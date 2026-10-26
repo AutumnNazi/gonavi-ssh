@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -373,13 +374,17 @@ func ListLocal(dir string) ([]Entry, error) {
 	return entries, nil
 }
 
-// LocalHome 返回本地用户目录（UI 初始路径）。
+// LocalHome 返回本地用户目录（UI 初始路径）。宿主以受限环境启动插件
+// 进程（USERPROFILE 等不可见）时 os.UserHomeDir 会失败，回落到
+// os/user（Windows 经令牌与注册表解析，不依赖环境变量）。
 func LocalHome() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "."
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return home
 	}
-	return home
+	if current, err := user.Current(); err == nil && current.HomeDir != "" {
+		return current.HomeDir
+	}
+	return ""
 }
 
 // listDrives 列出可选根：Windows 返回盘符列表，其他平台返回 /。

@@ -384,14 +384,14 @@ body,
   overflow: hidden;
 }
 
+/* 每栏两行固定结构：标题行（模式切换 + 服务器选择）+ 工具栏行，
+   左右两栏高度与对齐一致。 */
 .fs-pane-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  flex-wrap: wrap;
   padding-bottom: 6px;
-  border-bottom: 1px solid var(--border);
 }
 
 .fs-pane-remote .fs-pane-head {
@@ -406,8 +406,15 @@ body,
   padding-top: 6px;
 }
 
-.pane-title {
-  flex-wrap: wrap;
+.pane-toolbar {
+  display: flex;
+  align-items: center;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.pane-toolbar .ant-space {
+  width: 100%;
 }
 
 .pane-subject {

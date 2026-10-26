@@ -19,6 +19,7 @@ import {
   ArrowUpOutlined,
   CloseOutlined,
   CopyOutlined,
+  DashboardOutlined,
   DeleteOutlined,
   EditOutlined,
   FolderAddOutlined,
@@ -561,34 +562,34 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
     return (
       <div className={`fs-pane ${isLocal ? 'fs-pane-local' : 'fs-pane-remote'}`}>
         <div className="fs-pane-head">
-          <Space size={6} className="pane-title">
-            <Segmented
+          <Segmented
+            size="small"
+            value={kind}
+            onChange={v => switchKind(side, v as PaneKind)}
+            options={[
+              { label: t('sftp.modeLocal'), value: 'local' },
+              { label: t('sftp.modeRemote'), value: 'remote' },
+            ]}
+          />
+          {isLocal ? (
+            <Tag color="green" style={{ marginRight: 0 }}>{t('sftp.local')}</Tag>
+          ) : (
+            <Select
               size="small"
-              value={kind}
-              onChange={v => switchKind(side, v as PaneKind)}
-              options={[
-                { label: t('sftp.modeLocal'), value: 'local' },
-                { label: t('sftp.modeRemote'), value: 'remote' },
-              ]}
+              value={profileId || undefined}
+              placeholder={t('sftp.pickProfile')}
+              style={{ flex: 1, minWidth: 150, maxWidth: 260 }}
+              options={profileOptions}
+              onChange={v => {
+                if (side === 'left') setLeftProfileId(v)
+                else setRightProfileId(v)
+              }}
+              loading={busyProfile === profileId}
+              status={peerSame ? 'error' : undefined}
             />
-            {isLocal ? (
-              <Tag color="green" style={{ marginRight: 0 }}>{t('sftp.local')}</Tag>
-            ) : (
-              <Select
-                size="small"
-                value={profileId || undefined}
-                placeholder={t('sftp.pickProfile')}
-                style={{ minWidth: side === 'left' ? 160 : 180 }}
-                options={profileOptions}
-                onChange={v => {
-                  if (side === 'left') setLeftProfileId(v)
-                  else setRightProfileId(v)
-                }}
-                loading={busyProfile === profileId}
-                status={peerSame ? 'error' : undefined}
-              />
-            )}
-          </Space>
+          )}
+        </div>
+        <div className="pane-toolbar">
           <Space size={4} wrap>
             <Button size="small" icon={<ArrowLeftOutlined />} disabled={!nav.canBack}
               title={t('sftp.back')} onClick={() => navSide(side, 'back')} />
@@ -616,7 +617,8 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
                     if (sel.isDir) await remoteAction(side, 'sftp.removeRecursive', { path: sel.path })
                     else await remoteAction(side, 'sftp.remove', { path: sel.path })
                   }} />
-                <Button size="small" onClick={() => showDu(side)} disabled={!conn}>{t('sftp.du')}</Button>
+                <Button size="small" icon={<DashboardOutlined />} title={t('sftp.du')}
+                  onClick={() => showDu(side)} disabled={!conn} />
               </>
             )}
             <Button size="small" icon={<SwapOutlined />} title={t('sftp.sendToPeer')}
