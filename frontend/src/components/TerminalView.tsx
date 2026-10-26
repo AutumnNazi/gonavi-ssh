@@ -5,7 +5,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { invokeAs, describeError } from '../bridge'
-import { encodeText, decodeText } from '../b64'
+import { encodeText, createStreamDecoder } from '../b64'
 import { t } from '../i18n'
 import { isDark } from '../hostPrefs'
 import type { QuickCommand, TerminalTab } from '../types'
@@ -47,11 +47,13 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
   const [quickCommands, setQuickCommands] = useState<QuickCommand[]>([])
   const sessionKey = tab.sessionKey ?? ''
 
-  // 广播目标与写请求串行链放 ref：不进 effect 依赖。
+  // 广播目标与写入队列放 ref：不进 effect 依赖。
   const broadcastRef = useRef(false)
   const allTabsRef = useRef(allTabs)
   const onCwdRef = useRef(onCwd)
-  const writeChain = useRef<Promise<unknown>>(Promise.resolve())
+  const pendingWrites = useRef<string[]>([])
+  const pumping = useRef(false)
+  const stoppedRef = useRef(false)
   broadcastRef.current = broadcast
   allTabsRef.current = allTabs
   onCwdRef.current = onCwd
@@ -63,25 +65,58 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
           .map(x => x.sessionKey!)
       : []
 
-  // 写请求串行化：两次快速击键是两个并发 invoke，到达顺序无保证；
-  // 链式排队保证后端按敲键顺序写入 PTY。
+  // 写请求串行队列：保证敲键顺序，且桥并发满（429）时退避重试而不是
+  // 静默丢弃按键。会话已结束（not found）时清空队列。
   const enqueueWrite = (data: string) => {
-    const keys = [sessionKey, ...targets()]
-    const args =
-      keys.length > 1
-        ? { sessionKeys: keys, dataBase64: encodeText(data) }
-        : { sessionKey, dataBase64: encodeText(data) }
-    const cmd = keys.length > 1 ? 'terminal.writeMulti' : 'terminal.write'
-    writeChain.current = writeChain.current
-      .then(() => invokeAs(cmd, args))
-      .catch(() => {
-        // 会话刚结束时写失败由 read 的 eof 收尾。
-      })
+    pendingWrites.current.push(data)
+    if (pendingWrites.current.length > 200) {
+      pendingWrites.current.splice(0, pendingWrites.current.length - 200)
+    }
+    void pumpWrites()
+  }
+
+  const pumpWrites = async () => {
+    if (pumping.current) return
+    pumping.current = true
+    let failures = 0
+    try {
+      while (pendingWrites.current.length > 0 && !stoppedRef.current) {
+        const text = pendingWrites.current[0]
+        const keys = [sessionKey, ...targets()]
+        const args =
+          keys.length > 1
+            ? { sessionKeys: keys, dataBase64: encodeText(text) }
+            : { sessionKey, dataBase64: encodeText(text) }
+        const cmd = keys.length > 1 ? 'terminal.writeMulti' : 'terminal.write'
+        try {
+          await invokeAs(cmd, args)
+          pendingWrites.current.shift()
+          failures = 0
+        } catch (e) {
+          const code = (e as { code?: number })?.code
+          // 会话结束：丢弃剩余输入，由 read 的 eof 收尾。
+          if (code === 4101) {
+            pendingWrites.current = []
+            return
+          }
+          failures++
+          if (failures > 20) {
+            pendingWrites.current = []
+            return
+          }
+          await new Promise(r => setTimeout(r, Math.min(100 * failures, 1000)))
+        }
+      }
+    } finally {
+      pumping.current = false
+    }
   }
 
   useEffect(() => {
     if (!sessionKey) return
     let stopped = false
+    stoppedRef.current = false
+    const decodeChunk = createStreamDecoder()
 
     const term = new Terminal({
       fontSize: 13,
@@ -134,7 +169,7 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
           if (stopped) break
           retries = 0
           if (res.dataBase64) {
-            const text = decodeText(res.dataBase64)
+            const text = decodeChunk(res.dataBase64)
             term.write(text)
             osc7Re.lastIndex = 0
             const m = osc7Re.exec(text)
@@ -164,6 +199,8 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
 
     return () => {
       stopped = true
+      stoppedRef.current = true
+      pendingWrites.current = []
       if (injectTimer !== undefined) clearTimeout(injectTimer)
       observer.disconnect()
       dataSub.dispose()

@@ -170,7 +170,7 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
   const rightNav = useNavHistory()
 
   const [transfers, setTransfers] = useState<TransferStatus[]>([])
-  const [preview, setPreview] = useState<{ path: string; content: string; dirty: string; side: Side } | null>(null)
+  const [preview, setPreview] = useState<{ path: string; content: string; dirty: string; side: Side; truncated: boolean } | null>(null)
   const [du, setDu] = useState<{ side: Side; text: string } | null>(null)
   const [busyProfile, setBusyProfile] = useState('')
 
@@ -460,7 +460,7 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
     if (kind === 'remote' && !conn) return
     if (kind === 'local') return // 本地不提供预览编辑（避免误改本机文件）
     try {
-      const res = await invokeAs<{ dataBase64: string }>('sftp.preview', {
+      const res = await invokeAs<{ dataBase64: string; truncated?: boolean }>('sftp.preview', {
         connectionId: conn!.connectionId, path: entry.path, maxBytes: 262144,
       })
       const text = decodeText(res.dataBase64)
@@ -469,7 +469,7 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
         message.warning(`${entry.name}: binary`)
         return
       }
-      setPreview({ path: entry.path, content: text, dirty: text, side })
+      setPreview({ path: entry.path, content: text, dirty: text, side, truncated: !!res.truncated })
     } catch (e) {
       message.error(describeError(e))
     }
@@ -789,13 +789,20 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
         onCancel={() => setPreview(null)}
         onOk={savePreview}
         okText={t('sftp.saveFile')}
+        okButtonProps={{ disabled: !!preview?.truncated }}
         width={760}
       >
+        {preview?.truncated && (
+          <div style={{ color: '#faad14', fontSize: 12, marginBottom: 8 }}>
+            {t('sftp.previewTruncated')}
+          </div>
+        )}
         <Input.TextArea
           rows={20}
           value={preview?.dirty ?? ''}
           onChange={e => setPreview(p => (p ? { ...p, dirty: e.target.value } : p))}
           style={{ fontFamily: 'Consolas, monospace' }}
+          readOnly={!!preview?.truncated}
         />
       </Modal>
     </div>

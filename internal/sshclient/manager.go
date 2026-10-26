@@ -23,11 +23,12 @@ import (
 )
 
 const (
-	dialTimeout        = 15 * time.Second
-	keepaliveEvery     = 30 * time.Second
-	keepaliveFails     = 3
-	interactiveTimeout = 120 * time.Second // 留给用户输入动态码的时间
-	pendingTTL         = 10 * time.Minute  // failed pending 的保留时长
+	dialTimeout             = 15 * time.Second
+	keepaliveEvery          = 30 * time.Second
+	keepaliveFails          = 3
+	keepaliveRequestTimeout = 20 * time.Second
+	interactiveTimeout      = 120 * time.Second // 留给用户输入动态码的时间
+	pendingTTL              = 10 * time.Minute  // failed pending 的保留时长
 )
 
 // ConnState 是连接（含 pending 阶段）的状态。
@@ -420,16 +421,35 @@ func (m *Manager) dialHop(ctx context.Context, t dialTarget, interactive interac
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}
-	// SSH 握手 deadline：ClientConfig.Timeout 只在 ssh.Dial 内部生效，
-	// 手工 NewClientConn 必须自己约束——否则对端接受 TCP 但不握手时
-	// 拨号 goroutine 永久阻塞。握手成功后清除，把连接交还常规使用。
-	_ = netConn.SetDeadline(time.Now().Add(dialTimeout))
+	// 握手看门狗：对端接受 TCP 但不握手时不能永久阻塞。交互认证
+	// （OTP/TOTP）期间放宽到 dialTimeout+interactiveTimeout，避免用户
+	// 输入超过 15s 就被网络超时打断；交互结束恢复为握手超时。
+	hsTimer := time.AfterFunc(dialTimeout, func() { _ = netConn.Close() })
+	defer hsTimer.Stop()
+	stopCtx := context.AfterFunc(ctx, func() { _ = netConn.Close() })
+	defer stopCtx()
+
+	if interactive != nil {
+		wrapped := func(stage string) ssh.KeyboardInteractiveChallenge {
+			inner := interactive(stage)
+			return func(name, instruction string, questions []string, echos []bool) ([]string, error) {
+				hsTimer.Reset(dialTimeout + interactiveTimeout)
+				defer hsTimer.Reset(dialTimeout)
+				return inner(name, instruction, questions, echos)
+			}
+		}
+		methods, err = buildAuthMethods(t.creds, wrapped, t.stage)
+		if err != nil {
+			return nil, err
+		}
+		config.Auth = methods
+	}
+
 	sshConn, chans, reqs, err := ssh.NewClientConn(netConn, addr, config)
 	if err != nil {
 		_ = netConn.Close()
 		return nil, err
 	}
-	_ = netConn.SetDeadline(time.Time{})
 	return ssh.NewClient(sshConn, chans, reqs), nil
 }
 
@@ -438,7 +458,8 @@ func (m *Manager) OnDead(fn func(connectionID string)) {
 	m.onDead.Store(&fn)
 }
 
-// keepalive 周期性探测连接；连续失败即关闭，让上层得到明确的死亡信号。
+// keepalive 周期性探测连接；单次探测有超时（远端不回包时不无限
+// 挂起），连续失败即关闭，让上层得到明确的死亡信号。
 func (m *Manager) keepalive(conn *Conn) {
 	fails := 0
 	ticker := time.NewTicker(keepaliveEvery)
@@ -448,8 +469,7 @@ func (m *Manager) keepalive(conn *Conn) {
 		case <-conn.done:
 			return
 		case <-ticker.C:
-			_, _, err := conn.client.SendRequest("keepalive@openssh.com", true, nil)
-			if err == nil {
+			if m.keepaliveProbe(conn) {
 				fails = 0
 				continue
 			}
@@ -465,6 +485,25 @@ func (m *Manager) keepalive(conn *Conn) {
 				return
 			}
 		}
+	}
+}
+
+// keepaliveProbe 发送一次探活并等待回应，最多 keepaliveRequestTimeout。
+// SendRequest 无法取消：超时后探测 goroutine 会在连接关闭时返回，
+// 结果写入带缓冲 channel 不会阻塞。
+func (m *Manager) keepaliveProbe(conn *Conn) bool {
+	result := make(chan error, 1)
+	go func() {
+		_, _, err := conn.client.SendRequest("keepalive@openssh.com", true, nil)
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		return err == nil
+	case <-time.After(keepaliveRequestTimeout):
+		return false
+	case <-conn.done:
+		return false
 	}
 }
 

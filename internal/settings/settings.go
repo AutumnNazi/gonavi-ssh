@@ -206,19 +206,55 @@ func (s *Store) DangerousMatch(command string) string {
 }
 
 // AllowLocalPath 判断本地路径是否在边界内（空名单=不限制）。
+// 除字面路径外还解析符号链接/junction 后的真实路径再比较，防止
+// 白名单内的链接把实际访问带出边界。解析失败（路径尚不存在）时
+// 回落到解析父目录 + 文件名。
 func (s *Store) AllowLocalPath(path string) bool {
 	allow := s.Get().LocalPathAllowlist
 	if len(allow) == 0 {
 		return true
 	}
+	if matchesPrefixes(path, allow) {
+		// 字面命中仍要验证真实路径（若可解析），防止 symlink 穿透。
+		if resolved, err := resolveRealPath(path); err == nil {
+			return matchesPrefixes(resolved, allow)
+		}
+		return true
+	}
+	if resolved, err := resolveRealPath(path); err == nil {
+		return matchesPrefixes(resolved, allow)
+	}
+	return false
+}
+
+func matchesPrefixes(path string, allow []string) bool {
 	normalized := normalizeLocalPath(path)
 	for _, prefix := range allow {
 		prefix = normalizeLocalPath(strings.TrimSpace(prefix))
-		if prefix != "" && (normalized == prefix || strings.HasPrefix(normalized, prefix+string(filepath.Separator)) || strings.HasPrefix(normalized, prefix+"/")) {
+		if prefix != "" && (normalized == prefix ||
+			strings.HasPrefix(normalized, prefix+string(filepath.Separator)) ||
+			strings.HasPrefix(normalized, prefix+"/")) {
 			return true
 		}
 	}
 	return false
+}
+
+// resolveRealPath 返回路径解析符号链接/junction 后的真实路径；
+// 路径不存在时解析其父目录再接回文件名。
+func resolveRealPath(path string) (string, error) {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved, nil
+	}
+	parent := filepath.Dir(path)
+	if parent == path {
+		return "", errors.New("cannot resolve path")
+	}
+	resolvedParent, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(resolvedParent, filepath.Base(path)), nil
 }
 
 // normalizeLocalPath 统一分隔符做前缀比较（Windows 大小写不敏感盘符）。
@@ -232,10 +268,15 @@ func normalizeLocalPath(p string) string {
 }
 
 // AllowedReadOnlyExec 判断只读模式下是否放行该 exec 命令。
+// 与 sudo 白名单一致地拒绝 shell 元字符：前缀匹配挡不住
+// "uptime ; touch x" 这类拼接。
 func (s *Store) AllowedReadOnlyExec(command string) bool {
 	st := s.Get()
 	if !st.ReadOnly {
 		return true // 非只读无需检查
+	}
+	if strings.ContainsAny(command, ";&|`$()<>\\\n") {
+		return false
 	}
 	cmd := strings.TrimSpace(command)
 	for _, prefix := range st.ReadOnlyExecAllowlist {

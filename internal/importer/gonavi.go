@@ -57,11 +57,33 @@ func gonaviRoot(override string) (string, error) {
 	if root := strings.TrimSpace(os.Getenv("GONAVI_DATA_ROOT")); root != "" {
 		return root, nil
 	}
+	// 宿主以受限环境启动插件进程时拿不到 HOME/USERPROFILE；宿主注入的
+	// 插件数据目录（<configDir>/plugins/data/<id>）上溯三级即 configDir。
+	if root := rootFromPluginData(); root != "" {
+		return root, nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve the GoNavi data root automatically; pass root explicitly (%w)", err)
 	}
 	return filepath.Join(home, ".gonavi"), nil
+}
+
+// rootFromPluginData 从 GONAVI_PLUGIN_DATA 反推应用数据根，仅当该目录
+// 下确实存在 connections.json 时采用，避免把无关目录误判为宿主数据根。
+func rootFromPluginData() string {
+	data := strings.TrimSpace(os.Getenv("GONAVI_PLUGIN_DATA"))
+	if data == "" {
+		return ""
+	}
+	root := data
+	for i := 0; i < 3; i++ {
+		root = filepath.Dir(root)
+	}
+	if _, err := os.Stat(filepath.Join(root, "connections.json")); err != nil {
+		return ""
+	}
+	return root
 }
 
 // ImportFromGonavi 扫描宿主 connections.json，把带 SSH 隧道的连接导入为

@@ -261,11 +261,15 @@ func (a *App) sftpPreview(_ context.Context, raw json.RawMessage) (any, error) {
 	if !ok {
 		return nil, appErr(errNotFound, "connection not found or not ready")
 	}
-	data, err := a.sftp.ReadPreview(conn, req.Path, req.MaxBytes)
+	data, truncated, err := a.sftp.ReadPreview(conn, req.Path, req.MaxBytes)
 	if err != nil {
 		return nil, appErr(errSession, err.Error())
 	}
-	return map[string]any{"dataBase64": base64.StdEncoding.EncodeToString(data), "bytes": len(data)}, nil
+	return map[string]any{
+		"dataBase64": base64.StdEncoding.EncodeToString(data),
+		"bytes":      len(data),
+		"truncated":  truncated,
+	}, nil
 }
 
 // sftp.writeFile 写小文件（编辑器保存场景）；大文件走 transfer。

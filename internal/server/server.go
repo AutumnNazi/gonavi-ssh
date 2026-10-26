@@ -114,7 +114,9 @@ func (a *App) Handlers() map[string]goplugin.Handler {
 		{"conn.cancel", true, a.connCancel},
 		{"conn.status", false, a.connStatus},
 		{"conn.close", true, a.connClose},
-		{"session.teardown", true, a.sessionTeardown},
+		// 清理命令：只读模式下也必须放行（无远端副作用），否则关窗后
+		// 连接会残留到进程退出。
+		{"session.teardown", false, a.sessionTeardown},
 		// terminal
 		{"terminal.open", true, a.terminalOpen},
 		{"terminal.write", true, a.terminalWrite},

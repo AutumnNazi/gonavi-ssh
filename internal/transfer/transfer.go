@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -315,6 +316,34 @@ func (m *Manager) run(ctx context.Context, t *Task, conn *sshclient.Conn) {
 	t.mu.Unlock()
 }
 
+// partMeta 绑定断点文件与远端来源（路径/大小/修改时间）：换源或远端
+// 变化后旧 .part 不得再被续传或交付。
+type partMeta struct {
+	SourcePath string `json:"sourcePath"`
+	Size       int64  `json:"size"`
+	MTime      int64  `json:"mtime"`
+}
+
+func loadPartMeta(path string) (partMeta, error) {
+	var meta partMeta
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return meta, err
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return partMeta{}, err
+	}
+	return meta, nil
+}
+
+func savePartMeta(path string, meta partMeta) error {
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
 // download 远端 → 本地：.part 断点续传，完成后原子改名。
 func (m *Manager) download(ctx context.Context, t *Task, conn *sshclient.Conn) error {
 	client, err := m.sftp.Client(conn)
@@ -336,15 +365,30 @@ func (m *Manager) download(ctx context.Context, t *Task, conn *sshclient.Conn) e
 	t.mu.Unlock()
 
 	part := t.LocalPath + ".part"
+	metaPath := part + ".meta"
+	remoteMeta := partMeta{
+		SourcePath: t.RemotePath, Size: info.Size(), MTime: info.ModTime().Unix(),
+	}
 	var offset int64
 	if fi, err := os.Stat(part); err == nil {
 		offset = fi.Size()
-		// 残留 .part 与远端不一致（远端被截短/更换）：旧断点作废重传，
-		// 否则会把超长/陈旧的 .part 直接交付成损坏文件。
+		// 已存在的 .part 必须与当前远端来源一致（路径/大小/mtime），
+		// 否则视为换源或远端已变更：废弃断点，防止拼接或交付旧内容。
+		stale := false
+		if saved, merr := loadPartMeta(metaPath); merr != nil ||
+			saved.SourcePath != remoteMeta.SourcePath ||
+			saved.Size != remoteMeta.Size ||
+			saved.MTime != remoteMeta.MTime {
+			stale = true
+		}
 		if info.Size() == 0 || offset > info.Size() {
-			if rmErr := os.Remove(part); rmErr != nil {
+			stale = true
+		}
+		if stale {
+			if rmErr := os.Remove(part); rmErr != nil && !os.IsNotExist(rmErr) {
 				return fmt.Errorf("reset stale part file: %w", rmErr)
 			}
+			_ = os.Remove(metaPath)
 			offset = 0
 		}
 	}
@@ -356,14 +400,24 @@ func (m *Manager) download(ctx context.Context, t *Task, conn *sshclient.Conn) e
 		}
 		_ = f.Close()
 		_ = os.Remove(part)
+		_ = os.Remove(metaPath)
 		return nil
+	}
+	if offset == 0 {
+		if err := savePartMeta(metaPath, remoteMeta); err != nil {
+			return fmt.Errorf("write part metadata: %w", err)
+		}
 	}
 	t.mu.Lock()
 	t.bytesDone = offset
 	t.mu.Unlock()
 	if offset >= info.Size() {
 		// 上次已传完但没改名：直接进入收尾。
-		return os.Rename(part, t.LocalPath)
+		if err := os.Rename(part, t.LocalPath); err != nil {
+			return err
+		}
+		_ = os.Remove(metaPath)
+		return nil
 	}
 	if _, err := remote.Seek(offset, io.SeekStart); err != nil {
 		return err
@@ -380,7 +434,15 @@ func (m *Manager) download(ctx context.Context, t *Task, conn *sshclient.Conn) e
 	if err := copyWithProgress(ctx, f, remote, t, offset); err != nil {
 		return err
 	}
-	return os.Rename(part, t.LocalPath)
+	// Windows 上目标文件仍被打开时 Rename 会失败：先显式关闭再改名。
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(part, t.LocalPath); err != nil {
+		return err
+	}
+	_ = os.Remove(metaPath)
+	return nil
 }
 
 // upload 本地 → 远端：写远端临时名，完成后 PosixRename 原子替换。
@@ -435,6 +497,11 @@ func (m *Manager) upload(ctx context.Context, t *Task, conn *sshclient.Conn) err
 	}
 
 	if err := copyWithProgress(ctx, remote, local, t, offset); err != nil {
+		return err
+	}
+	// 显式关闭远端临时文件句柄后再改名（POSIX 语义宽松，但保持与
+	// 本地侧一致，避免依赖服务端对已打开文件 rename 的实现差异）。
+	if err := remote.Close(); err != nil {
 		return err
 	}
 	if err := client.PosixRename(remoteTemp, t.RemotePath); err != nil {

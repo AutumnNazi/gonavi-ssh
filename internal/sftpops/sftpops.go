@@ -243,23 +243,33 @@ func (m *Manager) removeDirRecursive(c *sftp.Client, path string) error {
 }
 
 // ReadPreview 读小文件内容（maxBytes 上限，用于文本预览）。
-func (m *Manager) ReadPreview(conn *sshclient.Conn, path string, maxBytes int64) ([]byte, error) {
+// 返回是否被截断：截断的预览禁止回写覆盖原文件。
+func (m *Manager) ReadPreview(conn *sshclient.Conn, path string, maxBytes int64) ([]byte, bool, error) {
 	if maxBytes <= 0 || maxBytes > 512*1024 {
 		maxBytes = 256 * 1024
 	}
 	c, err := m.client(conn)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	f, err := c.Open(remoteClean(path))
 	if err != nil {
-		return nil, fmt.Errorf("open: %w", err)
+		return nil, false, fmt.Errorf("open: %w", err)
 	}
 	defer f.Close()
-	return io.ReadAll(io.LimitReader(f, maxBytes))
+	info, err := f.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxBytes))
+	if err != nil {
+		return nil, false, err
+	}
+	return data, info.Size() > int64(len(data)), nil
 }
 
 // WriteFile 写小文件（覆盖）；大文件请走 transfer 上传。
+// 先写同目录临时文件再原子改名：写入中途失败不会把原文件清空。
 func (m *Manager) WriteFile(conn *sshclient.Conn, path string, content []byte) error {
 	if len(content) > 512*1024 {
 		return errors.New("content too large; use transfer upload instead")
@@ -268,13 +278,28 @@ func (m *Manager) WriteFile(conn *sshclient.Conn, path string, content []byte) e
 	if err != nil {
 		return err
 	}
-	f, err := c.Create(remoteClean(path))
+	target := remoteClean(path)
+	tmp := fmt.Sprintf("%s.saving-%d", target, time.Now().UnixNano())
+	f, err := c.Create(tmp)
 	if err != nil {
-		return fmt.Errorf("create: %w", err)
+		return fmt.Errorf("create temp: %w", err)
 	}
-	defer f.Close()
-	_, err = f.Write(content)
-	return err
+	if _, err := f.Write(content); err != nil {
+		_ = f.Close()
+		_ = c.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = c.Remove(tmp)
+		return err
+	}
+	if err := c.PosixRename(tmp, target); err != nil {
+		if rerr := c.Rename(tmp, target); rerr != nil {
+			_ = c.Remove(tmp)
+			return rerr
+		}
+	}
+	return nil
 }
 
 // DiskUsage 返回路径所在文件系统的用量（需服务器支持 statvfs 扩展）。
@@ -312,32 +337,53 @@ func (m *Manager) Pwd(conn *sshclient.Conn, path string) (string, error) {
 	return c.RealPath(remoteClean(path))
 }
 
-// Copy 在远端复制文件（服务器端流式读写，数据不过桥）。
+// Copy 在远端复制文件（服务器端流式读写，数据不过桥）。源与目标相同
+// 直接拒绝（打开源后再截断目标会清空源文件）；先写临时文件再原子改名，
+// 中途失败不会留下半截目标。
 func (m *Manager) Copy(conn *sshclient.Conn, srcPath, dstPath string) error {
 	c, err := m.client(conn)
 	if err != nil {
 		return err
 	}
-	src, err := c.Open(remoteClean(srcPath))
+	src := remoteClean(srcPath)
+	dst := remoteClean(dstPath)
+	if src == dst {
+		return errors.New("source and target are the same path")
+	}
+	srcF, err := c.Open(src)
 	if err != nil {
 		return fmt.Errorf("open src: %w", err)
 	}
-	defer src.Close()
-	info, err := src.Stat()
+	defer srcF.Close()
+	info, err := srcF.Stat()
 	if err != nil {
 		return err
 	}
 	if info.IsDir() {
 		return errors.New("copy supports files only; copy a directory tree via download+upload")
 	}
-	dst, err := c.Create(remoteClean(dstPath))
+	tmp := fmt.Sprintf("%s.copying-%d", dst, time.Now().UnixNano())
+	dstF, err := c.Create(tmp)
 	if err != nil {
-		return fmt.Errorf("create dst: %w", err)
+		return fmt.Errorf("create dst temp: %w", err)
 	}
-	defer dst.Close()
 	buf := make([]byte, 256*1024)
-	_, err = io.CopyBuffer(dst, src, buf)
-	return err
+	if _, err := io.CopyBuffer(dstF, srcF, buf); err != nil {
+		_ = dstF.Close()
+		_ = c.Remove(tmp)
+		return err
+	}
+	if err := dstF.Close(); err != nil {
+		_ = c.Remove(tmp)
+		return err
+	}
+	if err := c.PosixRename(tmp, dst); err != nil {
+		if rerr := c.Rename(tmp, dst); rerr != nil {
+			_ = c.Remove(tmp)
+			return rerr
+		}
+	}
+	return nil
 }
 
 // ---- 本地侧（插件进程直接以当前用户权限访问文件系统） ----

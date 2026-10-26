@@ -181,3 +181,32 @@ func TestSudoPasswordRoundTrip(t *testing.T) {
 		t.Fatal("sudo password leaked in plaintext")
 	}
 }
+
+// 跳板密码与口令必须进入加密存储（重启后仍可解密）。
+func TestJumpSecretsPersistEncrypted(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(dir)
+	_, err := s.Upsert(Profile{
+		Name: "n", Host: "h", User: "u", AuthMethod: AuthPassword, Password: "pw",
+		Jumps: []Jump{{
+			Host: "jump", Port: 22, User: "ops", AuthMethod: AuthPassword,
+			Password: "jump-pw", Passphrase: "jump-pp",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	again, _ := Open(dir)
+	list := again.List()
+	if len(list) != 1 || len(list[0].Jumps) != 1 {
+		t.Fatalf("jumps lost: %+v", list)
+	}
+	j := list[0].Jumps[0]
+	if j.Password != "jump-pw" || j.Passphrase != "jump-pp" {
+		t.Fatalf("jump secrets lost: %+v", j)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, profilesFile))
+	if strings.Contains(string(data), "jump-pw") {
+		t.Fatal("jump password leaked in plaintext")
+	}
+}

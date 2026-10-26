@@ -3,6 +3,7 @@ package transfer
 import (
 	"bytes"
 	"context"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -45,5 +46,22 @@ func TestCopyCancel(t *testing.T) {
 	err := copyWithProgress(ctx, &bytes.Buffer{}, strings.NewReader("data"), &task, 0)
 	if err == nil {
 		t.Fatal("expected cancel error")
+	}
+}
+
+// 断点元数据序列化往返（绑定来源路径/大小/mtime）。
+func TestPartMetaRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.part.meta")
+	meta := partMeta{SourcePath: "/root/a.log", Size: 1024, MTime: 1700000000}
+	if err := savePartMeta(path, meta); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, err := loadPartMeta(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got != meta {
+		t.Fatalf("got %+v want %+v", got, meta)
 	}
 }

@@ -43,6 +43,44 @@ type Jump struct {
 
 const maxJumps = 3
 
+// storedJump 是 Jumps 加密载荷内的序列化结构。载荷整体 AES-GCM 加密，
+// 因此这里必须包含跳板密码与口令——Jump 上的 json:"-" 只用于对外 JSON。
+type storedJump struct {
+	Host       string     `json:"host"`
+	Port       int        `json:"port"`
+	User       string     `json:"user"`
+	AuthMethod AuthMethod `json:"authMethod"`
+	KeyPath    string     `json:"keyPath,omitempty"`
+	Password   string     `json:"password,omitempty"`
+	Passphrase string     `json:"passphrase,omitempty"`
+}
+
+func marshalJumps(jumps []Jump) ([]byte, error) {
+	out := make([]storedJump, 0, len(jumps))
+	for _, j := range jumps {
+		out = append(out, storedJump{
+			Host: j.Host, Port: j.Port, User: j.User, AuthMethod: j.AuthMethod,
+			KeyPath: j.KeyPath, Password: j.Password, Passphrase: j.Passphrase,
+		})
+	}
+	return json.Marshal(out)
+}
+
+func unmarshalJumps(raw []byte) ([]Jump, error) {
+	var stored []storedJump
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		return nil, err
+	}
+	out := make([]Jump, 0, len(stored))
+	for _, j := range stored {
+		out = append(out, Jump{
+			Host: j.Host, Port: j.Port, User: j.User, AuthMethod: j.AuthMethod,
+			KeyPath: j.KeyPath, Password: j.Password, Passphrase: j.Passphrase,
+		})
+	}
+	return out, nil
+}
+
 // Profile 描述一台 SSH 服务器。Password/Passphrase/Jumps 敏感字段仅存在
 // 于内存，序列化时走 sealed 字段。
 type Profile struct {
@@ -306,8 +344,7 @@ func Open(dir string) (*Store, error) {
 		}
 		if sp.JumpsSealed != "" {
 			if plain, derr := s.sealOpen(sp.JumpsSealed); derr == nil {
-				var jumps []Jump
-				if jerr := json.Unmarshal([]byte(plain), &jumps); jerr == nil {
+				if jumps, jerr := unmarshalJumps([]byte(plain)); jerr == nil {
 					p.Jumps = jumps
 				}
 			}
@@ -414,7 +451,7 @@ func (s *Store) flushLocked() error {
 			sp.SudoPasswordSealed = sealed
 		}
 		if len(p.Jumps) > 0 {
-			raw, err := json.Marshal(p.Jumps)
+			raw, err := marshalJumps(p.Jumps)
 			if err != nil {
 				return err
 			}

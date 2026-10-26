@@ -2,6 +2,7 @@ package settings
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -149,5 +150,54 @@ func TestAllowLocalPath(t *testing.T) {
 		if got := s.AllowLocalPath(c.path); got != c.want {
 			t.Errorf("AllowLocalPath(%q)=%v want %v", c.path, got, c.want)
 		}
+	}
+}
+
+// 只读 exec 白名单必须拒绝 shell 元字符（前缀匹配挡不住命令拼接）。
+func TestReadOnlyExecRejectsMetachars(t *testing.T) {
+	s, _ := Open(t.TempDir())
+	base := s.Get()
+	base.ReadOnly = true
+	base.ReadOnlyExecAllowlist = []string{"uptime"}
+	if err := s.Update(base); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if s.AllowedReadOnlyExec("uptime ; touch /tmp/x") {
+		t.Fatal("metachar command must be rejected")
+	}
+	if s.AllowedReadOnlyExec("uptime && rm -rf /") {
+		t.Fatal("and-chain must be rejected")
+	}
+	if !s.AllowedReadOnlyExec("uptime") {
+		t.Fatal("plain allowlisted command must pass")
+	}
+}
+
+// 本地路径边界必须解析符号链接：白名单内的链接指向外部时拒绝。
+func TestAllowLocalPathRejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	inside := filepath.Join(root, "allowed")
+	outside := filepath.Join(root, "outside")
+	if err := os.MkdirAll(inside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(inside, "escape")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	s, _ := Open(t.TempDir())
+	base := s.Get()
+	base.LocalPathAllowlist = []string{inside}
+	if err := s.Update(base); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if !s.AllowLocalPath(filepath.Join(inside, "ok.txt")) {
+		t.Fatal("path inside allowlist must pass")
+	}
+	if s.AllowLocalPath(filepath.Join(link, "secret.txt")) {
+		t.Fatal("symlink escape must be rejected")
 	}
 }

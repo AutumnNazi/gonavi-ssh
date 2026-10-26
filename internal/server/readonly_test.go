@@ -64,3 +64,16 @@ func TestSettingsGetDefault(t *testing.T) {
 		t.Fatalf("bad defaults: %+v", st)
 	}
 }
+
+// 只读模式下 session.teardown（窗口关闭清理）必须放行，否则连接残留。
+func TestTeardownAllowedInReadOnly(t *testing.T) {
+	app := newTestApp(t)
+	handlers := app.Handlers()
+	if _, err := handlers["settings.set"](context.Background(), json.RawMessage(
+		`{"settings":{"readOnly":true,"historyLimit":100,"sudoAllowlist":[],"quickCommands":[]}}`)); err != nil {
+		t.Fatalf("enable readonly: %v", err)
+	}
+	if _, err := handlers["session.teardown"](context.Background(), json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("teardown must be allowed in read-only mode: %v", err)
+	}
+}

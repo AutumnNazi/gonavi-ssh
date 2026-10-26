@@ -26,3 +26,11 @@ export function encodeText(text: string): string {
 export function decodeText(base64: string): string {
   return new TextDecoder().decode(base64ToBytes(base64))
 }
+
+// createStreamDecoder 返回跨响应块保持状态的 UTF-8 解码器：
+// 终端输出按字节分块传输，多字节字符（中文/emoji）可能被切在两块之间，
+// 逐块独立 decode 会把它们解成 U+FFFD 乱码。
+export function createStreamDecoder(): (base64Chunk: string) => string {
+  const decoder = new TextDecoder()
+  return (base64Chunk: string) => decoder.decode(base64ToBytes(base64Chunk), { stream: true })
+}
