@@ -389,10 +389,8 @@ body,
 .fs-pane-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 6px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--border);
+  padding-bottom: 2px;
 }
 
 .fs-pane-remote .fs-pane-head {
@@ -407,13 +405,25 @@ body,
   padding-top: 6px;
 }
 
-/* 头部单行：主机选择器自适应 + 工具按钮组靠右。 */
-.fs-pane-head .ant-space {
-  flex: none;
+/* 双行头部：行1 模式切换 + 来源选择 + 主操作按钮；行2 导航/文件操作。 */
+.pane-head-spacer {
+  flex: 1;
 }
 
 .pane-source .ant-select-selector {
   border-radius: var(--radius-sm) !important;
+}
+
+.pane-toolbar {
+  display: flex;
+  align-items: center;
+  padding-bottom: 6px;
+  padding-top: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.pane-toolbar .ant-space {
+  width: 100%;
 }
 
 .pane-subject {
