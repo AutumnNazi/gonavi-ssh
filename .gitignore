@@ -1,0 +1,17 @@
+# 构建产物
+dist/
+package/
+node_modules/
+frontend/node_modules/
+*.zip
+*.tgz
+
+# 本地测试数据
+*.local.json
+
+# IDE
+.idea/
+.vscode/
+
+# ZCode 会话产物
+.zcode/

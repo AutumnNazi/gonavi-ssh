@@ -1,0 +1,463 @@
+/* 主题变量：跟随宿主注入的 theme（body.theme-dark），未注入时浅色。 */
+
+:root {
+  --term-bg: #ffffff;
+  --term-fg: #333333;
+  --toolbar-bg: #fafafa;
+  --toolbar-fg: #555;
+  --border: #f0f0f0;
+  --hover-bg: #f5f5f5;
+  --selected-bg: #e6f4ff;
+  --meta-fg: #999;
+}
+
+body.theme-dark {
+  --term-bg: #1e1e1e;
+  --term-fg: #cccccc;
+  --toolbar-bg: #252526;
+  --toolbar-fg: #ccc;
+  --border: #333;
+  --hover-bg: #2a2a2a;
+  --selected-bg: #15325b;
+  --meta-fg: #888;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+.app-root {
+  height: 100%;
+}
+
+.app-sider {
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+
+.app-content {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-content .ant-tabs {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-content .ant-tabs .ant-tabs-nav {
+  margin: 0 0 0 0;
+  padding: 0 8px;
+}
+
+.app-content .ant-tabs .ant-tabs-content-holder {
+  flex: 1;
+  min-height: 0;
+}
+
+.app-content .ant-tabs .ant-tabs-content,
+.app-content .ant-tabs .ant-tabs-tabpane {
+  height: 100%;
+}
+
+.app-content .ant-tabs .ant-tabs-tabpane {
+  background: var(--term-bg);
+}
+
+.empty-hint {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--meta-fg);
+  font-size: 14px;
+}
+
+/* ---- 侧栏 ---- */
+
+.profile-panel {
+  padding: 12px;
+}
+
+.profile-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.profile-item {
+  padding: 10px 4px !important;
+}
+
+.profile-addr {
+  font-size: 12px;
+  color: var(--meta-fg);
+}
+
+.profile-addr a {
+  margin-left: 8px;
+  font-size: 12px;
+}
+
+.profile-addr a.profile-del {
+  color: #ff4d4f;
+}
+
+/* ---- 终端 ---- */
+
+.terminal-host {
+  position: relative;
+  height: 100%;
+  padding: 4px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+}
+
+.terminal-xterm {
+  flex: 1;
+  min-height: 0;
+}
+
+.terminal-xterm .xterm {
+  height: 100%;
+}
+
+.terminal-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 8px;
+  text-align: center;
+  color: var(--meta-fg);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+/* ---- 主 Tab 与终端工具栏 ---- */
+
+.main-tabs {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 0 8px;
+}
+
+.main-tabs .ant-tabs-content-holder {
+  flex: 1;
+  min-height: 0;
+}
+
+.main-tabs .ant-tabs-content,
+.main-tabs .ant-tabs-tabpane {
+  height: 100%;
+}
+
+.terminals-wrap {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.terminals-wrap .ant-tabs {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.terminals-wrap .ant-tabs-content-holder {
+  flex: 1;
+  min-height: 0;
+}
+
+.terminals-wrap .ant-tabs-content,
+.terminals-wrap .ant-tabs-tabpane {
+  height: 100%;
+}
+
+.terminals-wrap .ant-tabs-tabpane {
+  background: var(--term-bg);
+}
+
+.terminal-toolbar {
+  display: flex;
+  align-items: center;
+  padding: 3px 8px;
+  background: var(--toolbar-bg);
+  color: var(--toolbar-fg);
+  font-size: 12px;
+}
+
+.terminal-toolbar .toolbar-label {
+  color: var(--toolbar-fg);
+  font-size: 12px;
+}
+
+.quick-cmd {
+  cursor: pointer;
+}
+
+.history-line {
+  cursor: pointer;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+}
+
+.challenge-prompt {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+/* ---- SFTP ---- */
+
+.sftp-wrap {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+}
+
+.sftp-columns {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 12px;
+}
+
+.fs-pane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.fs-pane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.fs-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 4px;
+}
+
+.fs-list {
+  font-size: 12px;
+}
+
+.fs-item {
+  padding: 3px 6px !important;
+  cursor: pointer;
+  border-radius: 4px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.fs-item:hover {
+  background: var(--hover-bg);
+}
+
+.fs-selected {
+  background: var(--selected-bg);
+}
+
+.fs-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fs-meta {
+  color: var(--meta-fg);
+  font-size: 11px;
+}
+
+.fs-du {
+  font-size: 12px;
+  color: var(--meta-fg);
+}
+
+.transfers-pane {
+  max-height: 190px;
+  display: flex;
+  flex-direction: column;
+}
+
+.transfers-list {
+  margin-top: 4px;
+}
+
+.transfer-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 2px 4px;
+}
+
+.transfer-path {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transfer-state {
+  color: var(--meta-fg);
+}
+
+.transfer-rate {
+  color: var(--meta-fg);
+}
+
+.transfer-err {
+  color: #ff4d4f;
+  font-weight: bold;
+  cursor: help;
+}
+
+.fs-empty {
+  color: var(--meta-fg);
+  font-size: 12px;
+  padding: 8px;
+}
+
+.jump-row {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 28px 0 8px;
+  margin-bottom: 8px;
+}
+
+.jump-remove {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  color: #ff4d4f;
+}
+
+/* ---- 设置 ---- */
+
+.settings-wrap {
+  padding: 16px;
+  overflow-y: auto;
+  height: 100%;
+}
+
+.challenge-label {
+  display: block;
+  font-size: 12px;
+  color: var(--meta-fg);
+  margin-bottom: 4px;
+}
+
+/* ---- 路径栏（面包屑）与两栏区分 ---- */
+
+.path-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  min-height: 26px;
+  background: var(--toolbar-bg);
+}
+
+.path-breadcrumb {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.crumb .crumb-icon {
+  font-size: 12px;
+}
+
+.crumb a {
+  color: var(--toolbar-fg);
+  cursor: pointer;
+  border-radius: 3px;
+  padding: 0 2px;
+}
+
+.crumb a:hover {
+  background: var(--hover-bg);
+  color: #1677ff;
+}
+
+.crumb-sep {
+  color: var(--meta-fg);
+  margin: 0 1px;
+}
+
+.crumb.root {
+  font-size: 12px;
+  color: var(--meta-fg);
+  cursor: pointer;
+  flex: 1;
+}
+
+.path-edit {
+  color: var(--meta-fg);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.path-edit:hover {
+  color: #1677ff;
+}
+
+.pane-subject {
+  font-size: 12px;
+}
+
+/* 两栏视觉区分：远程=蓝色顶边，本机=绿色顶边。 */
+.fs-pane-remote .fs-pane-head {
+  border-top: 2px solid #1677ff;
+  padding-top: 2px;
+}
+
+.fs-pane-local .fs-pane-head {
+  border-top: 2px solid #52c41a;
+  padding-top: 2px;
+}
+
+/* 测试连接结果详情 */
+.test-result-detail {
+  font-size: 12px;
+}
+
+.fingerprint-line {
+  font-family: Consolas, monospace;
+  color: var(--meta-fg);
+  word-break: break-all;
+}
