@@ -320,6 +320,9 @@ func (a *App) fsListLocal(_ context.Context, raw json.RawMessage) (any, error) {
 	if err := decode(raw, &req); err != nil {
 		return nil, err
 	}
+	if req.Path != "" && !a.settings.AllowLocalPath(req.Path) {
+		return nil, appErr(errBadArgument, "path is outside the configured localPathAllowlist")
+	}
 	entries, err := sftpops.ListLocal(req.Path)
 	if err != nil {
 		return nil, appErr(errSession, err.Error())
@@ -331,21 +334,43 @@ func (a *App) fsListLocal(_ context.Context, raw json.RawMessage) (any, error) {
 
 func (a *App) transferStart(_ context.Context, raw json.RawMessage) (any, error) {
 	var req struct {
-		ConnectionID string `json:"connectionId"`
-		Direction    string `json:"direction"`
-		RemotePath   string `json:"remotePath"`
-		LocalPath    string `json:"localPath"`
+		ConnectionID       string `json:"connectionId"`
+		Direction          string `json:"direction"`
+		RemotePath         string `json:"remotePath"`
+		LocalPath          string `json:"localPath"`
+		TargetConnectionID string `json:"targetConnectionId"`
+		TargetPath         string `json:"targetPath"`
 	}
 	if err := decode(raw, &req); err != nil {
 		return nil, err
+	}
+	dir := transfer.Direction(req.Direction)
+	switch dir {
+	case transfer.Upload, transfer.Download:
+		// 本地直传磁盘路径（见下）。
+	case transfer.ServerToServer:
+		src, ok := a.conns.Get(req.ConnectionID)
+		if !ok {
+			return nil, appErr(errNotFound, "source connection not found or not ready")
+		}
+		dst, ok := a.conns.Get(req.TargetConnectionID)
+		if !ok {
+			return nil, appErr(errNotFound, "target connection not found or not ready")
+		}
+		task, err := a.transfers.StartRemote(src, req.RemotePath, dst, req.TargetPath)
+		if err != nil {
+			return nil, appErr(errBadArgument, err.Error())
+		}
+		return map[string]any{"taskId": task.ID}, nil
+	default:
+		return nil, appErr(errBadArgument, "direction must be upload, download or serverToServer")
 	}
 	conn, ok := a.conns.Get(req.ConnectionID)
 	if !ok {
 		return nil, appErr(errNotFound, "connection not found or not ready")
 	}
-	dir := transfer.Direction(req.Direction)
-	if dir != transfer.Upload && dir != transfer.Download {
-		return nil, appErr(errBadArgument, "direction must be upload or download")
+	if !a.settings.AllowLocalPath(req.LocalPath) {
+		return nil, appErr(errBadArgument, "localPath is outside the configured localPathAllowlist")
 	}
 	task, err := a.transfers.Start(conn, dir, req.RemotePath, req.LocalPath)
 	if err != nil {

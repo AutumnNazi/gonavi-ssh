@@ -274,7 +274,9 @@ export default function App() {
                 label: t('tab.files'),
                 children: (
                   <SftpPanel
-                    connections={connections.filter(c => c.state === 'ready' && c.alive)}
+                    profiles={profiles}
+                    connections={connections}
+                    onConnectionsChanged={refreshConnections}
                     initialRemotePath={cwd}
                   />
                 ),

@@ -61,9 +61,11 @@ export interface FsEntry {
 export interface TransferStatus {
   id: string
   connectionId: string
-  direction: 'upload' | 'download'
+  direction: 'upload' | 'download' | 'serverToServer'
   remotePath: string
   localPath: string
+  peerConnectionId?: string
+  peerPath?: string
   state: 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
   bytesDone: number
   totalBytes: number

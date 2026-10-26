@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${1:-0.1.0}"
+VERSION="${1:-0.0.1}"
 STAGE="$ROOT/package"
 OUT="$ROOT/dist/gonavi-ssh-v$VERSION.zip"
 

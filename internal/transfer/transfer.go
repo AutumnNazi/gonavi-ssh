@@ -23,8 +23,9 @@ import (
 type Direction string
 
 const (
-	Upload   Direction = "upload"   // 本地 → 远端
-	Download Direction = "download" // 远端 → 本地
+	Upload         Direction = "upload"         // 本地 → 远端
+	Download       Direction = "download"       // 远端 → 本地
+	ServerToServer Direction = "serverToServer" // 远端 A → 远端 B（插件进程中转，不落本地磁盘）
 )
 
 // State 任务状态。
@@ -45,6 +46,9 @@ type Task struct {
 	Direction    Direction `json:"direction"`
 	RemotePath   string    `json:"remotePath"`
 	LocalPath    string    `json:"localPath"`
+	// ServerToServer：目标连接与目标路径。
+	PeerConnectionID string `json:"peerConnectionId,omitempty"`
+	PeerPath         string `json:"peerPath,omitempty"`
 
 	mu         sync.Mutex
 	state      State
@@ -58,18 +62,20 @@ type Task struct {
 
 // Status 是任务对外快照。
 type Status struct {
-	ID           string    `json:"id"`
-	ConnectionID string    `json:"connectionId"`
-	Direction    Direction `json:"direction"`
-	RemotePath   string    `json:"remotePath"`
-	LocalPath    string    `json:"localPath"`
-	State        State     `json:"state"`
-	BytesDone    int64     `json:"bytesDone"`
-	TotalBytes   int64     `json:"totalBytes"`
-	Error        string    `json:"error,omitempty"`
-	StartedAt    time.Time `json:"startedAt"`
-	EndedAt      time.Time `json:"endedAt,omitempty"`
-	RateBps      int64     `json:"rateBps"`
+	ID               string    `json:"id"`
+	ConnectionID     string    `json:"connectionId"`
+	Direction        Direction `json:"direction"`
+	RemotePath       string    `json:"remotePath"`
+	LocalPath        string    `json:"localPath"`
+	PeerConnectionID string    `json:"peerConnectionId,omitempty"`
+	PeerPath         string    `json:"peerPath,omitempty"`
+	State            State     `json:"state"`
+	BytesDone        int64     `json:"bytesDone"`
+	TotalBytes       int64     `json:"totalBytes"`
+	Error            string    `json:"error,omitempty"`
+	StartedAt        time.Time `json:"startedAt"`
+	EndedAt          time.Time `json:"endedAt,omitempty"`
+	RateBps          int64     `json:"rateBps"`
 }
 
 func (t *Task) snapshot() Status {
@@ -78,6 +84,7 @@ func (t *Task) snapshot() Status {
 	st := Status{
 		ID: t.ID, ConnectionID: t.ConnectionID, Direction: t.Direction,
 		RemotePath: t.RemotePath, LocalPath: t.LocalPath,
+		PeerConnectionID: t.PeerConnectionID, PeerPath: t.PeerPath,
 		State: t.state, BytesDone: t.bytesDone, TotalBytes: t.totalBytes,
 		StartedAt: t.startedAt, EndedAt: t.endedAt,
 	}
@@ -151,6 +158,130 @@ func (m *Manager) Start(conn *sshclient.Conn, dir Direction, remotePath, localPa
 
 	go m.run(ctx, t, conn)
 	return t, nil
+}
+
+// StartRemote 启动服务器到服务器的传输（插件进程中转：读 A 的 SFTP
+// 流、写 B 的临时文件，完成后原子改名；内容不落本地磁盘）。
+func (m *Manager) StartRemote(srcConn *sshclient.Conn, srcPath string, dstConn *sshclient.Conn, dstPath string) (*Task, error) {
+	if srcPath == "" || dstPath == "" {
+		return nil, errors.New("source and target paths are required")
+	}
+	if srcConn.ID == dstConn.ID {
+		return nil, errors.New("source and target are the same connection")
+	}
+	id, err := newTaskID()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t := &Task{
+		ID: id, ConnectionID: srcConn.ID, Direction: ServerToServer,
+		RemotePath: srcPath, PeerConnectionID: dstConn.ID, PeerPath: dstPath,
+		state: Queued, cancel: cancel,
+	}
+	m.addTask(t)
+	go m.runRemote(ctx, t, srcConn, dstConn)
+	return t, nil
+}
+
+// addTask 登记任务并维持有界任务表（只淘汰已终结任务）。
+func (m *Manager) addTask(t *Task) {
+	m.mu.Lock()
+	m.tasks[t.ID] = t
+	m.order = append(m.order, t.ID)
+	if len(m.order) > 200 {
+		var drop string
+		for _, old := range m.order[:len(m.order)-200+1] {
+			ot, ok := m.tasks[old]
+			if !ok {
+				drop = old
+				break
+			}
+			ot.mu.Lock()
+			st := ot.state
+			ot.mu.Unlock()
+			if st != Running && st != Queued {
+				drop = old
+				break
+			}
+		}
+		if drop != "" {
+			m.order = removeFromOrder(m.order, drop)
+			delete(m.tasks, drop)
+		}
+	}
+	m.mu.Unlock()
+}
+
+// runRemote 执行 A→B 的流式传输。
+func (m *Manager) runRemote(ctx context.Context, t *Task, srcConn, dstConn *sshclient.Conn) {
+	if err := m.serverToServer(ctx, t, srcConn, dstConn); err != nil {
+		t.mu.Lock()
+		t.endedAt = time.Now()
+		if errors.Is(err, context.Canceled) {
+			t.state = Cancelled
+		} else {
+			t.state = Failed
+			t.err = err
+		}
+		t.mu.Unlock()
+		return
+	}
+	t.mu.Lock()
+	t.endedAt = time.Now()
+	t.state = Done
+	t.mu.Unlock()
+}
+
+// serverToServer 读源 SFTP 写目标 SFTP 临时名，完成后 PosixRename。
+func (m *Manager) serverToServer(ctx context.Context, t *Task, srcConn, dstConn *sshclient.Conn) error {
+	t.mu.Lock()
+	t.state = Running
+	t.startedAt = time.Now()
+	t.mu.Unlock()
+
+	srcClient, err := m.sftp.Client(srcConn)
+	if err != nil {
+		return err
+	}
+	dstClient, err := m.sftp.Client(dstConn)
+	if err != nil {
+		return err
+	}
+	src, err := srcClient.Open(t.RemotePath)
+	if err != nil {
+		return fmt.Errorf("open source: %w", err)
+	}
+	defer src.Close()
+	info, err := src.Stat()
+	if err != nil {
+		return err
+	}
+	t.mu.Lock()
+	t.totalBytes = info.Size()
+	t.mu.Unlock()
+
+	tmp := fmt.Sprintf("%s.copying-%s", t.PeerPath, t.ID)
+	dst, err := dstClient.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC)
+	if err != nil {
+		return fmt.Errorf("create target temp: %w", err)
+	}
+	cleanup := func() { _ = dst.Close(); _ = dstClient.Remove(tmp) }
+	if err := copyWithProgress(ctx, dst, src, t, 0); err != nil {
+		cleanup()
+		return err
+	}
+	if err := dst.Close(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := dstClient.PosixRename(tmp, t.PeerPath); err != nil {
+		if rerr := dstClient.Rename(tmp, t.PeerPath); rerr != nil {
+			_ = dstClient.Remove(tmp)
+			return rerr
+		}
+	}
+	return nil
 }
 
 // run 执行传输：下载写 .part 再改名；上传写远端临时名再 PosixRename。
