@@ -279,10 +279,18 @@ func (m *Manager) WriteFile(conn *sshclient.Conn, path string, content []byte) e
 		return err
 	}
 	target := remoteClean(path)
+	// 保留原文件权限（0600、可执行位等），原子替换不改变安全属性。
+	origMode := fs.FileMode(0)
+	if orig, serr := c.Stat(target); serr == nil {
+		origMode = orig.Mode().Perm()
+	}
 	tmp := fmt.Sprintf("%s.saving-%d", target, time.Now().UnixNano())
 	f, err := c.Create(tmp)
 	if err != nil {
 		return fmt.Errorf("create temp: %w", err)
+	}
+	if origMode != 0 {
+		_ = f.Chmod(origMode)
 	}
 	if _, err := f.Write(content); err != nil {
 		_ = f.Close()
@@ -367,6 +375,8 @@ func (m *Manager) Copy(conn *sshclient.Conn, srcPath, dstPath string) error {
 	if err != nil {
 		return fmt.Errorf("create dst temp: %w", err)
 	}
+	// cp 语义：目标沿用源文件权限（含可执行位）。
+	_ = dstF.Chmod(info.Mode().Perm())
 	buf := make([]byte, 256*1024)
 	if _, err := io.CopyBuffer(dstF, srcF, buf); err != nil {
 		_ = dstF.Close()

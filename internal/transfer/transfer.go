@@ -319,6 +319,9 @@ func (m *Manager) run(ctx context.Context, t *Task, conn *sshclient.Conn) {
 // partMeta 绑定断点文件与远端来源（路径/大小/修改时间）：换源或远端
 // 变化后旧 .part 不得再被续传或交付。
 type partMeta struct {
+	// Host 绑定远端身份（profileID@addr）：两台服务器上路径/大小/mtime
+	// 相同也不能互相续传，否则会拼接或交付旧文件。
+	Host       string `json:"host"`
 	SourcePath string `json:"sourcePath"`
 	Size       int64  `json:"size"`
 	MTime      int64  `json:"mtime"`
@@ -337,11 +340,22 @@ func loadPartMeta(path string) (partMeta, error) {
 }
 
 func savePartMeta(path string, meta partMeta) error {
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return errors.New("refusing to write part metadata through a symlink")
+	}
 	data, err := json.Marshal(meta)
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(path, data, 0o644)
+}
+
+// refuseSymlink 拒绝通过符号链接写入：预置链接可把写入带出路径边界。
+func refuseSymlink(path string) error {
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to write through symlink %s", path)
+	}
+	return nil
 }
 
 // download 远端 → 本地：.part 断点续传，完成后原子改名。
@@ -366,7 +380,11 @@ func (m *Manager) download(ctx context.Context, t *Task, conn *sshclient.Conn) e
 
 	part := t.LocalPath + ".part"
 	metaPath := part + ".meta"
+	if err := refuseSymlink(part); err != nil {
+		return err
+	}
 	remoteMeta := partMeta{
+		Host:       conn.ProfileID + "@" + conn.Addr,
 		SourcePath: t.RemotePath, Size: info.Size(), MTime: info.ModTime().Unix(),
 	}
 	var offset int64
@@ -376,6 +394,7 @@ func (m *Manager) download(ctx context.Context, t *Task, conn *sshclient.Conn) e
 		// 否则视为换源或远端已变更：废弃断点，防止拼接或交付旧内容。
 		stale := false
 		if saved, merr := loadPartMeta(metaPath); merr != nil ||
+			saved.Host != remoteMeta.Host ||
 			saved.SourcePath != remoteMeta.SourcePath ||
 			saved.Size != remoteMeta.Size ||
 			saved.MTime != remoteMeta.MTime {
@@ -394,6 +413,9 @@ func (m *Manager) download(ctx context.Context, t *Task, conn *sshclient.Conn) e
 	}
 	// 远端是空文件：直接落空文件并清掉残留 .part。
 	if info.Size() == 0 {
+		if serr := refuseSymlink(t.LocalPath); serr != nil {
+			return serr
+		}
 		f, cerr := os.OpenFile(t.LocalPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 		if cerr != nil {
 			return fmt.Errorf("create local file: %w", cerr)

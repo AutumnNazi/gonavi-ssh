@@ -54,6 +54,7 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
   const pendingWrites = useRef<string[]>([])
   const pumping = useRef(false)
   const stoppedRef = useRef(false)
+  const inputWarned = useRef(false)
   broadcastRef.current = broadcast
   allTabsRef.current = allTabs
   onCwdRef.current = onCwd
@@ -65,12 +66,14 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
           .map(x => x.sessionKey!)
       : []
 
-  // 写请求串行队列：保证敲键顺序，且桥并发满（429）时退避重试而不是
-  // 静默丢弃按键。会话已结束（not found）时清空队列。
+  // 写请求串行队列：保证敲键顺序。只有"本地桥拒绝、请求未执行"的错误
+  // （并发满/窗口忙）才退避重试；超时或结果未知一律不重放——重发可能让
+  // 已执行的命令（如回车）再执行一次。
   const enqueueWrite = (data: string) => {
     pendingWrites.current.push(data)
-    if (pendingWrites.current.length > 200) {
-      pendingWrites.current.splice(0, pendingWrites.current.length - 200)
+    if (pendingWrites.current.length > 512) {
+      // 极端保护：长时间无成功写入时才丢最旧，正常由 read 礼让消化。
+      pendingWrites.current.splice(0, pendingWrites.current.length - 512)
     }
     void pumpWrites()
   }
@@ -93,14 +96,25 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
           pendingWrites.current.shift()
           failures = 0
         } catch (e) {
-          const code = (e as { code?: number })?.code
+          const code = (e as { code?: unknown })?.code
           // 会话结束：丢弃剩余输入，由 read 的 eof 收尾。
           if (code === 4101) {
             pendingWrites.current = []
             return
           }
+          const retryable = code === 'too_many_requests' || code === 'window_busy_or_revoked' || code === 429
+          if (!retryable) {
+            // 结果未知（超时/网络）：不重放，丢弃该项并提示一次。
+            pendingWrites.current.shift()
+            if (!inputWarned.current) {
+              inputWarned.current = true
+              message.warning(t('term.inputDropped'))
+            }
+            failures = 0
+            continue
+          }
           failures++
-          if (failures > 20) {
+          if (failures > 40) {
             pendingWrites.current = []
             return
           }
@@ -160,6 +174,15 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
     async function pollLoop() {
       let retries = 0
       while (!stopped) {
+        // 写优先：桥并发预算被长轮询占满时，先把槽位让给按键，
+        // 避免 write 被持续拒绝。
+        if (pendingWrites.current.length > 0) {
+          const until = Date.now() + 1500
+          while (pendingWrites.current.length > 0 && !stopped && Date.now() < until) {
+            await new Promise(r => setTimeout(r, 50))
+          }
+        }
+        if (stopped) break
         try {
           const res = await invokeAs<ReadResult>('terminal.read', {
             sessionKey,

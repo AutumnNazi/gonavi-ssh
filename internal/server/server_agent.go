@@ -20,7 +20,7 @@ func (a *App) agentCommands() []command {
 		{"agent.execMulti", false, a.agentExecMulti},
 		{"agent.runBg", true, a.agentRunBg},
 		{"agent.taskStatus", false, a.agentTaskStatus},
-		{"agent.taskCancel", true, a.agentTaskCancel},
+		{"agent.taskCancel", false, a.agentTaskCancel},
 		{"agent.metrics", false, a.agentMetrics},
 		{"agent.triage", false, a.agentTriage},
 	}

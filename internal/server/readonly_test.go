@@ -77,3 +77,28 @@ func TestTeardownAllowedInReadOnly(t *testing.T) {
 		t.Fatalf("teardown must be allowed in read-only mode: %v", err)
 	}
 }
+
+// 只读模式下清理类命令必须放行（连接/终端/任务取消）。
+func TestCleanupCommandsAllowedInReadOnly(t *testing.T) {
+	app := newTestApp(t)
+	handlers := app.Handlers()
+	if _, err := handlers["settings.set"](context.Background(), json.RawMessage(
+		`{"settings":{"readOnly":true,"historyLimit":100,"sudoAllowlist":[],"quickCommands":[]}}`)); err != nil {
+		t.Fatalf("enable readonly: %v", err)
+	}
+	cases := [][2]string{
+		{"conn.close", `{"connectionId":"c_missing"}`},
+		{"conn.cancel", `{"connectionId":"c_missing"}`},
+		{"terminal.close", `{"sessionKey":"t_missing"}`},
+		{"transfer.cancel", `{"taskId":"x_missing"}`},
+		{"agent.taskCancel", `{"taskId":"bg_missing"}`},
+	}
+	for _, c := range cases {
+		if _, err := handlers[c[0]](context.Background(), json.RawMessage(c[1])); err != nil {
+			perr, ok := err.(*goplugin.Error)
+			if ok && perr.Code == errReadOnly {
+				t.Fatalf("%s must be allowed in read-only mode", c[0])
+			}
+		}
+	}
+}

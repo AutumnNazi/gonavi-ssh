@@ -210,3 +210,26 @@ func TestJumpSecretsPersistEncrypted(t *testing.T) {
 		t.Fatal("jump password leaked in plaintext")
 	}
 }
+
+// 编辑时前端提交空跳板密码：后端逐跳沿用旧凭据（不因编辑而清空）。
+func TestEditKeepsJumpSecrets(t *testing.T) {
+	s, _ := Open(t.TempDir())
+	first, err := s.Upsert(Profile{
+		Name: "n", Host: "h", User: "u", AuthMethod: AuthPassword,
+		Jumps: []Jump{{Host: "jump", Port: 22, User: "ops", AuthMethod: AuthPassword, Password: "jp"}},
+	})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	// 模拟编辑表单：密码为空串提交。
+	edited, err := s.Upsert(Profile{
+		ID: first.ID, Name: "renamed", Host: "h", User: "u", AuthMethod: AuthPassword,
+		Jumps: []Jump{{Host: "jump", Port: 22, User: "ops", AuthMethod: AuthPassword, Password: ""}},
+	})
+	if err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	if len(edited.Jumps) != 1 || edited.Jumps[0].Password != "jp" {
+		t.Fatalf("jump password lost on edit: %+v", edited.Jumps)
+	}
+}

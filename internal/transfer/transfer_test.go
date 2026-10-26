@@ -53,7 +53,7 @@ func TestCopyCancel(t *testing.T) {
 func TestPartMetaRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "x.part.meta")
-	meta := partMeta{SourcePath: "/root/a.log", Size: 1024, MTime: 1700000000}
+	meta := partMeta{Host: "p1@10.0.0.5:22", SourcePath: "/root/a.log", Size: 1024, MTime: 1700000000}
 	if err := savePartMeta(path, meta); err != nil {
 		t.Fatalf("save: %v", err)
 	}

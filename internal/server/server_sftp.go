@@ -32,7 +32,7 @@ func (a *App) sftpCommands() []command {
 		{"transfer.start", true, a.transferStart},
 		{"transfer.status", false, a.transferStatus},
 		{"transfer.list", false, a.transferList},
-		{"transfer.cancel", true, a.transferCancel},
+		{"transfer.cancel", false, a.transferCancel},
 		{"transfer.retry", true, a.transferRetry},
 	}
 }
@@ -373,8 +373,16 @@ func (a *App) transferStart(_ context.Context, raw json.RawMessage) (any, error)
 	if !ok {
 		return nil, appErr(errNotFound, "connection not found or not ready")
 	}
-	if !a.settings.AllowLocalPath(req.LocalPath) {
-		return nil, appErr(errBadArgument, "localPath is outside the configured localPathAllowlist")
+	// 下载实际写入 localPath、localPath.part 与 .part.meta 三个路径，
+	// 全部按边界校验（防止预置链接把任一写入带出白名单）。
+	for _, localPath := range []string{
+		req.LocalPath,
+		req.LocalPath + ".part",
+		req.LocalPath + ".part.meta",
+	} {
+		if !a.settings.AllowLocalPath(localPath) {
+			return nil, appErr(errBadArgument, "localPath is outside the configured localPathAllowlist")
+		}
 	}
 	task, err := a.transfers.Start(conn, dir, req.RemotePath, req.LocalPath)
 	if err != nil {

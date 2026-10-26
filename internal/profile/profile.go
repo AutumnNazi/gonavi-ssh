@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -400,8 +401,24 @@ func (s *Store) Upsert(p Profile) (Profile, error) {
 			p.SudoPassword = old.SudoPassword
 		}
 		// jumps 为 nil 表示本次未提供（沿用旧值）；显式空数组表示清空。
+		// 非 nil 时逐跳沿用空密码/口令（编辑表单不回显敏感字段）。
 		if p.Jumps == nil {
 			p.Jumps = old.Jumps
+		} else if len(old.Jumps) > 0 {
+			oldByKey := make(map[string]Jump, len(old.Jumps))
+			for _, oj := range old.Jumps {
+				oldByKey[jumpKey(oj)] = oj
+			}
+			for i := range p.Jumps {
+				if oj, ok := oldByKey[jumpKey(p.Jumps[i])]; ok {
+					if p.Jumps[i].Password == "" {
+						p.Jumps[i].Password = oj.Password
+					}
+					if p.Jumps[i].Passphrase == "" {
+						p.Jumps[i].Passphrase = oj.Passphrase
+					}
+				}
+			}
 		}
 	}
 	p.UpdatedAt = now
@@ -509,6 +526,15 @@ func (s *Store) sealOpen(encoded string) (string, error) {
 		return "", err
 	}
 	return string(plain), nil
+}
+
+// jumpKey 按连接目标标识一跳（与敏感字段无关），用于编辑时沿用旧凭据。
+func jumpKey(j Jump) string {
+	port := j.Port
+	if port == 0 {
+		port = 22
+	}
+	return j.Host + "\x00" + strconv.Itoa(port) + "\x00" + j.User
 }
 
 func newID() (string, error) {

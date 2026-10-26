@@ -111,9 +111,10 @@ func (a *App) Handlers() map[string]goplugin.Handler {
 		// conn（两段式连接）
 		{"conn.open", true, a.connOpen},
 		{"conn.answer", true, a.connAnswer},
-		{"conn.cancel", true, a.connCancel},
+		// 清理类命令在只读模式下放行（无远端副作用）。
+		{"conn.cancel", false, a.connCancel},
 		{"conn.status", false, a.connStatus},
-		{"conn.close", true, a.connClose},
+		{"conn.close", false, a.connClose},
 		// 清理命令：只读模式下也必须放行（无远端副作用），否则关窗后
 		// 连接会残留到进程退出。
 		{"session.teardown", false, a.sessionTeardown},
@@ -123,7 +124,7 @@ func (a *App) Handlers() map[string]goplugin.Handler {
 		{"terminal.writeMulti", true, a.terminalWriteMulti},
 		{"terminal.read", false, a.terminalRead},
 		{"terminal.resize", true, a.terminalResize},
-		{"terminal.close", true, a.terminalClose},
+		{"terminal.close", false, a.terminalClose},
 		{"terminal.list", false, a.terminalList},
 		{"terminal.history", false, a.terminalHistory},
 	}

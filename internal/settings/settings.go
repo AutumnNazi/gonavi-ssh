@@ -215,16 +215,40 @@ func (s *Store) AllowLocalPath(path string) bool {
 		return true
 	}
 	if matchesPrefixes(path, allow) {
-		// 字面命中仍要验证真实路径（若可解析），防止 symlink 穿透。
-		if resolved, err := resolveRealPath(path); err == nil {
+		// 字面命中仍要验证最终落点（若可解析），防止 symlink 穿透。
+		if resolved, err := resolveWritePath(path); err == nil {
 			return matchesPrefixes(resolved, allow)
 		}
 		return true
 	}
-	if resolved, err := resolveRealPath(path); err == nil {
+	if resolved, err := resolveWritePath(path); err == nil {
 		return matchesPrefixes(resolved, allow)
 	}
 	return false
+}
+
+// resolveWritePath 解析写入路径的最终落点。与 EvalSymlinks 不同，它
+// 会沿失效符号链接的 Readlink 目标继续解析——否则预置的 dangling
+// 链接会让 O_CREATE 在白名单外创建并写入文件。
+func resolveWritePath(path string) (string, error) {
+	return resolveWritePathDepth(path, 0)
+}
+
+func resolveWritePathDepth(path string, depth int) (string, error) {
+	if depth > 10 {
+		return "", errors.New("too many symlink levels")
+	}
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(path)
+		if err != nil {
+			return "", err
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(path), target)
+		}
+		return resolveWritePathDepth(target, depth+1)
+	}
+	return resolveRealPath(path)
 }
 
 func matchesPrefixes(path string, allow []string) bool {

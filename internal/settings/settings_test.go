@@ -201,3 +201,33 @@ func TestAllowLocalPathRejectsSymlinkEscape(t *testing.T) {
 		t.Fatal("symlink escape must be rejected")
 	}
 }
+
+// 失效符号链接（dangling）也必须拦截：O_CREATE 会沿链接在白名单外创建文件。
+func TestAllowLocalPathRejectsDanglingSymlink(t *testing.T) {
+	root := t.TempDir()
+	inside := filepath.Join(root, "allowed")
+	outside := filepath.Join(root, "outside")
+	if err := os.MkdirAll(inside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 指向白名单外一个尚不存在的文件。
+	link := filepath.Join(inside, "newfile")
+	if err := os.Symlink(filepath.Join(outside, "victim.txt"), link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	s, _ := Open(t.TempDir())
+	base := s.Get()
+	base.LocalPathAllowlist = []string{inside}
+	if err := s.Update(base); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if s.AllowLocalPath(link) {
+		t.Fatal("dangling symlink escaping the allowlist must be rejected")
+	}
+	if s.AllowLocalPath(link + ".part") {
+		t.Fatal("part path through dangling symlink must be rejected")
+	}
+}

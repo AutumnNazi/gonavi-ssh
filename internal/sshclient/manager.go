@@ -228,6 +228,14 @@ func (m *Manager) OpenBegin(p profile.Profile) Status {
 func (m *Manager) runDial(pend *Pending, p profile.Profile) {
 	defer close(pend.done)
 	client, viaChain, err := m.dialChain(pend.ctx, p, m.interactiveFor(pend))
+	// 取消发生在握手成功之后、注册之前：关闭刚建立的连接链，不登记。
+	if err == nil && pend.ctx.Err() != nil {
+		_ = client.Close()
+		for i := len(viaChain) - 1; i >= 0; i-- {
+			_ = viaChain[i].Close()
+		}
+		err = pend.ctx.Err()
+	}
 	m.mu.Lock()
 	delete(m.byProfilePending, pend.ProfileID)
 	if err != nil {
