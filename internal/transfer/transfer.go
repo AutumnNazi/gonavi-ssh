@@ -16,7 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"gonavi-ssh/internal/sftpops"
+	"github.com/pkg/sftp"
+
 	"gonavi-ssh/internal/sshclient"
 )
 
@@ -101,23 +102,30 @@ func (t *Task) snapshot() Status {
 	return st
 }
 
+type sftpClientProvider interface {
+	Client(*sshclient.Conn) (*sftp.Client, error)
+}
+
 // Manager 管理任务表；新任务立即异步执行。
 type Manager struct {
-	sftp *sftpops.Manager
+	sftp sftpClientProvider
 
 	mu    sync.Mutex
 	tasks map[string]*Task
 	order []string // 保持创建顺序（列表展示）
 }
 
-func NewManager(s *sftpops.Manager) *Manager {
+func NewManager(s sftpClientProvider) *Manager {
 	return &Manager{sftp: s, tasks: map[string]*Task{}}
 }
 
 // Start 创建并启动一个传输任务。
-func (m *Manager) Start(conn *sshclient.Conn, dir Direction, remotePath, localPath string) (*Task, error) {
+func (m *Manager) Start(conn *sshclient.Conn, dir Direction, remotePath, localPath string, allowLocalPath func(string) bool) (*Task, error) {
 	if remotePath == "" || localPath == "" {
 		return nil, errors.New("remotePath and localPath are required")
+	}
+	if err := checkLocalPaths(dir, localPath, allowLocalPath); err != nil {
+		return nil, err
 	}
 	id, err := newTaskID()
 	if err != nil {
@@ -625,7 +633,7 @@ func (m *Manager) CloseAll() {
 }
 
 // Retry 重试一个失败/取消的任务（断点续传）。
-func (m *Manager) Retry(id string, conn *sshclient.Conn) (string, error) {
+func (m *Manager) Retry(id string, conn *sshclient.Conn, allowLocalPath func(string) bool, peer ...*sshclient.Conn) (string, error) {
 	m.mu.Lock()
 	old, ok := m.tasks[id]
 	m.mu.Unlock()
@@ -636,7 +644,19 @@ func (m *Manager) Retry(id string, conn *sshclient.Conn) (string, error) {
 	if s.State != Failed && s.State != Cancelled {
 		return "", fmt.Errorf("only failed or cancelled tasks can retry")
 	}
-	nt, err := m.Start(conn, s.Direction, s.RemotePath, s.LocalPath)
+	var nt *Task
+	var err error
+	if s.Direction == ServerToServer {
+		if conn.ID != s.ConnectionID {
+			return "", errors.New("source connection does not match the original task")
+		}
+		if len(peer) != 1 || peer[0] == nil || peer[0].ID != s.PeerConnectionID {
+			return "", errors.New("target connection does not match the original task")
+		}
+		nt, err = m.StartRemote(conn, s.RemotePath, peer[0], s.PeerPath)
+	} else {
+		nt, err = m.Start(conn, s.Direction, s.RemotePath, s.LocalPath, allowLocalPath)
+	}
 	if err != nil {
 		return "", err
 	}

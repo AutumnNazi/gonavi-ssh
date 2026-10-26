@@ -280,17 +280,19 @@ func (m *Manager) WriteFile(conn *sshclient.Conn, path string, content []byte) e
 	}
 	target := remoteClean(path)
 	// 保留原文件权限（0600、可执行位等），原子替换不改变安全属性。
-	origMode := fs.FileMode(0)
-	if orig, serr := c.Stat(target); serr == nil {
-		origMode = orig.Mode().Perm()
+	orig, statErr := c.Stat(target)
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("stat target: %w", statErr)
 	}
 	tmp := fmt.Sprintf("%s.saving-%d", target, time.Now().UnixNano())
 	f, err := c.Create(tmp)
 	if err != nil {
 		return fmt.Errorf("create temp: %w", err)
 	}
-	if origMode != 0 {
-		_ = f.Chmod(origMode)
+	if statErr == nil {
+		if err := f.Chmod(orig.Mode().Perm()); err != nil {
+			return errors.Join(fmt.Errorf("preserve target permissions: %w", err), f.Close(), c.Remove(tmp))
+		}
 	}
 	if _, err := f.Write(content); err != nil {
 		_ = f.Close()
@@ -376,7 +378,9 @@ func (m *Manager) Copy(conn *sshclient.Conn, srcPath, dstPath string) error {
 		return fmt.Errorf("create dst temp: %w", err)
 	}
 	// cp 语义：目标沿用源文件权限（含可执行位）。
-	_ = dstF.Chmod(info.Mode().Perm())
+	if err := dstF.Chmod(info.Mode().Perm()); err != nil {
+		return errors.Join(fmt.Errorf("preserve source permissions: %w", err), dstF.Close(), c.Remove(tmp))
+	}
 	buf := make([]byte, 256*1024)
 	if _, err := io.CopyBuffer(dstF, srcF, buf); err != nil {
 		_ = dstF.Close()

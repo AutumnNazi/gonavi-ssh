@@ -228,26 +228,39 @@ func (m *Manager) OpenBegin(p profile.Profile) Status {
 func (m *Manager) runDial(pend *Pending, p profile.Profile) {
 	defer close(pend.done)
 	client, viaChain, err := m.dialChain(pend.ctx, p, m.interactiveFor(pend))
-	// 取消发生在握手成功之后、注册之前：关闭刚建立的连接链，不登记。
-	if err == nil && pend.ctx.Err() != nil {
-		_ = client.Close()
-		for i := len(viaChain) - 1; i >= 0; i-- {
-			_ = viaChain[i].Close()
-		}
-		err = pend.ctx.Err()
-	}
+	m.finishDial(pend, p, client, viaChain, err)
+}
+
+// finishDial linearizes publication with cancellation and validates both indexes.
+func (m *Manager) finishDial(pend *Pending, p profile.Profile, client *ssh.Client, viaChain []*ssh.Client, err error) {
 	m.mu.Lock()
-	delete(m.byProfilePending, pend.ProfileID)
+	current := m.pending[pend.ID] == pend && m.byProfilePending[pend.ProfileID] == pend
+	if pend.ctx.Err() != nil || !current {
+		err = context.Canceled
+	}
+	if m.byProfilePending[pend.ProfileID] == pend {
+		delete(m.byProfilePending, pend.ProfileID)
+	}
 	if err != nil {
-		if pend.ctx.Err() != nil {
+		if errors.Is(err, context.Canceled) {
 			pend.setState(StateCancelled, errors.New("cancelled by user"), nil, nil)
-			// 取消的 pending 立即摘除；failed 的短暂保留供 UI 读错误。
-			delete(m.pending, pend.ID)
+			if m.pending[pend.ID] == pend {
+				delete(m.pending, pend.ID)
+			}
 		} else {
 			pend.setState(StateFailed, sanitizeDialError(err), nil, nil)
 			time.AfterFunc(pendingTTL, func() { m.dropPending(pend.ID) })
 		}
 		m.mu.Unlock()
+		if len(viaChain) > 0 {
+			_ = viaChain[0].Close()
+		}
+		if client != nil {
+			_ = client.Close()
+		}
+		for i := len(viaChain) - 1; i >= 0; i-- {
+			_ = viaChain[i].Close()
+		}
 		return
 	}
 	conn := &Conn{
@@ -255,10 +268,9 @@ func (m *Manager) runDial(pend *Pending, p profile.Profile) {
 		Addr: joinAddr(p.Host, p.Port), client: client, via: viaChain,
 		openedAt: time.Now(), done: make(chan struct{}),
 	}
+	conn.touch()
 	m.conns[conn.ID] = conn
 	m.byProfile[conn.ProfileID] = conn
-	// 成功后 pending 条目立即摘除（ready 状态由 conns 提供），
-	// 否则 conn.status 会返回重复记录。
 	delete(m.pending, pend.ID)
 	pend.setState(StateReady, nil, nil, conn)
 	m.mu.Unlock()
@@ -314,10 +326,10 @@ func (m *Manager) CancelPending(connectionID string) {
 	m.mu.Lock()
 	pend, ok := m.pending[connectionID]
 	m.mu.Unlock()
+	m.CloseByID(connectionID)
 	if !ok {
 		return
 	}
-	pend.cancel()
 	select {
 	case <-pend.done:
 	case <-time.After(5 * time.Second):
@@ -349,7 +361,7 @@ func (m *Manager) dialChain(ctx context.Context, p profile.Profile, interactive 
 				User: j.User, AuthMethod: j.AuthMethod, KeyPath: j.KeyPath,
 				Password: j.Password, Passphrase: j.Passphrase,
 			},
-			stage: stage, via: lastOf(chain),
+			stage: stage, via: lastOf(chain), root: firstOf(chain),
 		}, interactive)
 		if err != nil {
 			cleanup()
@@ -363,13 +375,20 @@ func (m *Manager) dialChain(ctx context.Context, p profile.Profile, interactive 
 			User: p.User, AuthMethod: p.AuthMethod, KeyPath: p.KeyPath,
 			Password: p.Password, Passphrase: p.Passphrase,
 		},
-		stage: "main", via: lastOf(chain),
+		stage: "main", via: lastOf(chain), root: firstOf(chain),
 	}, interactive)
 	if err != nil {
 		cleanup()
 		return nil, nil, err
 	}
 	return final, chain, nil
+}
+
+func firstOf(chain []*ssh.Client) *ssh.Client {
+	if len(chain) == 0 {
+		return nil
+	}
+	return chain[0]
 }
 
 func lastOf(chain []*ssh.Client) *ssh.Client {
@@ -386,6 +405,7 @@ type dialTarget struct {
 	creds creds
 	stage string
 	via   *ssh.Client // nil 表示直接 TCP
+	root  *ssh.Client // 此链直接 TCP 客户端，失败时关闭以唤醒所有隧道
 }
 
 // dialHop 拨通一跳并返回客户端；via 非空时经由上层客户端的转发通道。
@@ -400,6 +420,14 @@ func (m *Manager) dialHop(ctx context.Context, t dialTarget, interactive interac
 		Auth:            methods,
 		HostKeyCallback: m.hosts.callbackFor(addr),
 		Timeout:         dialTimeout,
+	}
+	closeUpstream := func() {
+		if t.root != nil {
+			_ = t.root.Close()
+		}
+		if t.via != nil {
+			_ = t.via.Close()
+		}
 	}
 	var netConn net.Conn
 	if t.via == nil {
@@ -418,12 +446,17 @@ func (m *Manager) dialHop(ctx context.Context, t dialTarget, interactive interac
 		case r := <-ch:
 			netConn, err = r.c, r.e
 		case <-ctx.Done():
-			go func() {
-				if r := <-ch; r.c != nil {
-					_ = r.c.Close()
-				}
-			}()
+			closeUpstream()
+			if r := <-ch; r.c != nil {
+				_ = r.c.Close()
+			}
 			return nil, ctx.Err()
+		case <-time.After(dialTimeout):
+			closeUpstream()
+			if r := <-ch; r.c != nil {
+				_ = r.c.Close()
+			}
+			return nil, context.DeadlineExceeded
 		}
 	}
 	if err != nil {
@@ -432,30 +465,37 @@ func (m *Manager) dialHop(ctx context.Context, t dialTarget, interactive interac
 	// 握手看门狗：对端接受 TCP 但不握手时不能永久阻塞。交互认证
 	// （OTP/TOTP）期间放宽到 dialTimeout+interactiveTimeout，避免用户
 	// 输入超过 15s 就被网络超时打断；交互结束恢复为握手超时。
-	hsTimer := time.AfterFunc(dialTimeout, func() { _ = netConn.Close() })
-	defer hsTimer.Stop()
-	stopCtx := context.AfterFunc(ctx, func() { _ = netConn.Close() })
-	defer stopCtx()
+	closeTransport := func() {
+		closeUpstream()
+		_ = netConn.Close()
+	}
+	guard := newHandshakeGuard(ctx, closeTransport)
+	defer guard.finish(ctx)
 
 	if interactive != nil {
 		wrapped := func(stage string) ssh.KeyboardInteractiveChallenge {
 			inner := interactive(stage)
 			return func(name, instruction string, questions []string, echos []bool) ([]string, error) {
-				hsTimer.Reset(dialTimeout + interactiveTimeout)
-				defer hsTimer.Reset(dialTimeout)
+				guard.reset(dialTimeout + interactiveTimeout)
+				defer guard.reset(dialTimeout)
 				return inner(name, instruction, questions, echos)
 			}
 		}
 		methods, err = buildAuthMethods(t.creds, wrapped, t.stage)
 		if err != nil {
+			closeTransport()
 			return nil, err
 		}
 		config.Auth = methods
 	}
 
 	sshConn, chans, reqs, err := ssh.NewClientConn(netConn, addr, config)
-	if err != nil {
-		_ = netConn.Close()
+	guardErr := guard.finish(ctx)
+	if err != nil || guardErr != nil {
+		closeTransport()
+		if guardErr != nil {
+			return nil, guardErr
+		}
 		return nil, err
 	}
 	return ssh.NewClient(sshConn, chans, reqs), nil
@@ -547,13 +587,18 @@ func (m *Manager) CloseByID(id string) {
 	m.mu.Lock()
 	conn, hasConn := m.conns[id]
 	pend, hasPend := m.pending[id]
-	m.mu.Unlock()
-	if hasConn {
-		m.drop(conn)
-		conn.Close()
-	}
 	if hasPend {
 		pend.cancel()
+	}
+	if hasConn {
+		delete(m.conns, id)
+		if m.byProfile[conn.ProfileID] == conn {
+			delete(m.byProfile, conn.ProfileID)
+		}
+	}
+	m.mu.Unlock()
+	if hasConn {
+		conn.Close()
 	}
 }
 
@@ -564,9 +609,8 @@ func (m *Manager) CloseAll() {
 	for _, c := range m.conns {
 		conns = append(conns, c)
 	}
-	pends := make([]*Pending, 0, len(m.pending))
 	for _, p := range m.pending {
-		pends = append(pends, p)
+		p.cancel()
 	}
 	m.conns = map[string]*Conn{}
 	m.byProfile = map[string]*Conn{}
@@ -575,9 +619,6 @@ func (m *Manager) CloseAll() {
 	m.mu.Unlock()
 	for _, c := range conns {
 		c.Close()
-	}
-	for _, p := range pends {
-		p.cancel()
 	}
 }
 

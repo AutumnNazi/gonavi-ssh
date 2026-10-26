@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"gonavi-ssh/internal/sftpops"
+	"gonavi-ssh/internal/sshclient"
 	"gonavi-ssh/internal/transfer"
 )
 
@@ -373,18 +374,7 @@ func (a *App) transferStart(_ context.Context, raw json.RawMessage) (any, error)
 	if !ok {
 		return nil, appErr(errNotFound, "connection not found or not ready")
 	}
-	// 下载实际写入 localPath、localPath.part 与 .part.meta 三个路径，
-	// 全部按边界校验（防止预置链接把任一写入带出白名单）。
-	for _, localPath := range []string{
-		req.LocalPath,
-		req.LocalPath + ".part",
-		req.LocalPath + ".part.meta",
-	} {
-		if !a.settings.AllowLocalPath(localPath) {
-			return nil, appErr(errBadArgument, "localPath is outside the configured localPathAllowlist")
-		}
-	}
-	task, err := a.transfers.Start(conn, dir, req.RemotePath, req.LocalPath)
+	task, err := a.transfers.Start(conn, dir, req.RemotePath, req.LocalPath, a.settings.AllowLocalPath)
 	if err != nil {
 		return nil, appErr(errBadArgument, err.Error())
 	}
@@ -426,6 +416,10 @@ func (a *App) transferCancel(_ context.Context, raw json.RawMessage) (any, error
 }
 
 func (a *App) transferRetry(_ context.Context, raw json.RawMessage) (any, error) {
+	return a.retryTransfer(raw, a.conns.Get)
+}
+
+func (a *App) retryTransfer(raw json.RawMessage, connection func(string) (*sshclient.Conn, bool)) (any, error) {
 	var req struct {
 		TaskID       string `json:"taskId"`
 		ConnectionID string `json:"connectionId"`
@@ -433,11 +427,26 @@ func (a *App) transferRetry(_ context.Context, raw json.RawMessage) (any, error)
 	if err := decode(raw, &req); err != nil {
 		return nil, err
 	}
-	conn, ok := a.conns.Get(req.ConnectionID)
+	status, ok := a.transfers.Status(req.TaskID)
+	if !ok {
+		return nil, appErr(errNotFound, "task not found")
+	}
+	if status.State != transfer.Failed && status.State != transfer.Cancelled {
+		return nil, appErr(errSession, "only failed or cancelled tasks can retry")
+	}
+	conn, ok := connection(req.ConnectionID)
 	if !ok {
 		return nil, appErr(errNotFound, "connection not found or not ready")
 	}
-	newID, err := a.transfers.Retry(req.TaskID, conn)
+	var peer []*sshclient.Conn
+	if status.Direction == transfer.ServerToServer {
+		target, ok := connection(status.PeerConnectionID)
+		if !ok {
+			return nil, appErr(errNotFound, "target connection not found or not ready")
+		}
+		peer = append(peer, target)
+	}
+	newID, err := a.transfers.Retry(req.TaskID, conn, a.settings.AllowLocalPath, peer...)
 	if err != nil {
 		return nil, appErr(errSession, err.Error())
 	}

@@ -227,7 +227,16 @@ func TestAllowLocalPathRejectsDanglingSymlink(t *testing.T) {
 	if s.AllowLocalPath(link) {
 		t.Fatal("dangling symlink escaping the allowlist must be rejected")
 	}
-	if s.AllowLocalPath(link + ".part") {
-		t.Fatal("part path through dangling symlink must be rejected")
+	for _, suffix := range []string{".part", ".part.meta"} {
+		sidecar := link + suffix
+		if !s.AllowLocalPath(sidecar) {
+			t.Fatal("independent sidecar path inside the allowlist must pass")
+		}
+		if err := os.Symlink(filepath.Join(outside, "victim.txt"), sidecar); err != nil {
+			t.Fatal(err)
+		}
+		if s.AllowLocalPath(sidecar) {
+			t.Fatal("actual sidecar symlink escaping the allowlist must be rejected")
+		}
 	}
 }

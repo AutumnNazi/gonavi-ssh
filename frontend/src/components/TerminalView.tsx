@@ -6,9 +6,15 @@ import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { invokeAs, describeError } from '../bridge'
 import { encodeText, createStreamDecoder } from '../b64'
+import { createTerminalWriteQueue } from '../terminalWriteQueue'
 import { t } from '../i18n'
 import { isDark } from '../hostPrefs'
 import type { QuickCommand, TerminalTab } from '../types'
+
+interface WriteRequest {
+  command: 'terminal.write' | 'terminal.writeMulti'
+  args: { sessionKey?: string; sessionKeys?: string[]; dataBase64: string }
+}
 
 interface ReadResult {
   dataBase64: string
@@ -32,6 +38,7 @@ interface Props {
 const RETRY_MAX = 8
 const RETRY_BASE_MS = 500
 const RETRY_CAP_MS = 5000
+const INPUT_WARNING_INTERVAL_MS = 1500
 
 // 终端视图：sessionKey 由上层创建，这里只负责 xterm 渲染、长轮询、
 // 输入写入（可广播到同连接其他会话）、历史与快捷命令。
@@ -51,10 +58,8 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
   const broadcastRef = useRef(false)
   const allTabsRef = useRef(allTabs)
   const onCwdRef = useRef(onCwd)
-  const pendingWrites = useRef<string[]>([])
-  const pumping = useRef(false)
-  const stoppedRef = useRef(false)
-  const inputWarned = useRef(false)
+  const writeQueueRef = useRef<ReturnType<typeof createTerminalWriteQueue<WriteRequest>> | null>(null)
+  const nextInputWarningRef = useRef(0)
   broadcastRef.current = broadcast
   allTabsRef.current = allTabs
   onCwdRef.current = onCwd
@@ -66,70 +71,35 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
           .map(x => x.sessionKey!)
       : []
 
-  // 写请求串行队列：保证敲键顺序。只有"本地桥拒绝、请求未执行"的错误
-  // （并发满/窗口忙）才退避重试；超时或结果未知一律不重放——重发可能让
-  // 已执行的命令（如回车）再执行一次。
-  const enqueueWrite = (data: string) => {
-    pendingWrites.current.push(data)
-    if (pendingWrites.current.length > 512) {
-      // 极端保护：长时间无成功写入时才丢最旧，正常由 read 礼让消化。
-      pendingWrites.current.splice(0, pendingWrites.current.length - 512)
-    }
-    void pumpWrites()
+  const warnInputDropped = () => {
+    const now = Date.now()
+    if (now < nextInputWarningRef.current) return
+    nextInputWarningRef.current = now + INPUT_WARNING_INTERVAL_MS
+    message.warning(t('term.inputDropped'))
   }
 
-  const pumpWrites = async () => {
-    if (pumping.current) return
-    pumping.current = true
-    let failures = 0
-    try {
-      while (pendingWrites.current.length > 0 && !stoppedRef.current) {
-        const text = pendingWrites.current[0]
-        const keys = [sessionKey, ...targets()]
-        const args =
-          keys.length > 1
-            ? { sessionKeys: keys, dataBase64: encodeText(text) }
-            : { sessionKey, dataBase64: encodeText(text) }
-        const cmd = keys.length > 1 ? 'terminal.writeMulti' : 'terminal.write'
-        try {
-          await invokeAs(cmd, args)
-          pendingWrites.current.shift()
-          failures = 0
-        } catch (e) {
-          const code = (e as { code?: unknown })?.code
-          // 会话结束：丢弃剩余输入，由 read 的 eof 收尾。
-          if (code === 4101) {
-            pendingWrites.current = []
-            return
-          }
-          const retryable = code === 'too_many_requests' || code === 'window_busy_or_revoked' || code === 429
-          if (!retryable) {
-            // 结果未知（超时/网络）：不重放，丢弃该项并提示一次。
-            pendingWrites.current.shift()
-            if (!inputWarned.current) {
-              inputWarned.current = true
-              message.warning(t('term.inputDropped'))
-            }
-            failures = 0
-            continue
-          }
-          failures++
-          if (failures > 40) {
-            pendingWrites.current = []
-            return
-          }
-          await new Promise(r => setTimeout(r, Math.min(100 * failures, 1000)))
-        }
-      }
-    } finally {
-      pumping.current = false
+  // 请求与广播目标入队时固定；重试不会改变在途项或重复发送已知结果。
+  const enqueueWrite = (data: string) => {
+    const queue = writeQueueRef.current
+    if (!queue) {
+      warnInputDropped()
+      return false
     }
+    const keys = [sessionKey, ...targets()]
+    const args = keys.length > 1
+      ? { sessionKeys: keys, dataBase64: encodeText(data) }
+      : { sessionKey, dataBase64: encodeText(data) }
+    return queue.enqueue({ command: keys.length > 1 ? 'terminal.writeMulti' : 'terminal.write', args })
   }
 
   useEffect(() => {
     if (!sessionKey) return
     let stopped = false
-    stoppedRef.current = false
+    const writeQueue = createTerminalWriteQueue<WriteRequest>(
+      (item, signal) => invokeAs(item.command, item.args, { signal }),
+      warnInputDropped,
+    )
+    writeQueueRef.current = writeQueue
     const decodeChunk = createStreamDecoder()
 
     const term = new Terminal({
@@ -176,9 +146,9 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
       while (!stopped) {
         // 写优先：桥并发预算被长轮询占满时，先把槽位让给按键，
         // 避免 write 被持续拒绝。
-        if (pendingWrites.current.length > 0) {
+        if (writeQueue.hasWork()) {
           const until = Date.now() + 1500
-          while (pendingWrites.current.length > 0 && !stopped && Date.now() < until) {
+          while (writeQueue.hasWork() && !stopped && Date.now() < until) {
             await new Promise(r => setTimeout(r, 50))
           }
         }
@@ -199,6 +169,7 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
             if (m && m[1]) onCwdRef.current(m[1])
           }
           if (res.eof) {
+            writeQueue.stop()
             setStatus('closed')
             setDetail(res.hasExit ? t('term.exitCode', { code: res.exitCode ?? -1 }) : t('term.ended'))
             return
@@ -207,6 +178,7 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
           if (stopped) return
           // 瞬时失败（桥并发满/超时）退避重试；连续失败才终止。
           if (retries >= RETRY_MAX) {
+            writeQueue.stop()
             setStatus('error')
             setDetail(describeError(e))
             term.write(`\r\n\x1b[31m${describeError(e)}\x1b[0m\r\n`)
@@ -222,8 +194,8 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
 
     return () => {
       stopped = true
-      stoppedRef.current = true
-      pendingWrites.current = []
+      writeQueue.stop()
+      if (writeQueueRef.current === writeQueue) writeQueueRef.current = null
       if (injectTimer !== undefined) clearTimeout(injectTimer)
       observer.disconnect()
       dataSub.dispose()

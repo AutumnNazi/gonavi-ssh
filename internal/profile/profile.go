@@ -14,7 +14,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -405,12 +404,17 @@ func (s *Store) Upsert(p Profile) (Profile, error) {
 		if p.Jumps == nil {
 			p.Jumps = old.Jumps
 		} else if len(old.Jumps) > 0 {
-			oldByKey := make(map[string]Jump, len(old.Jumps))
+			oldByKey := make(map[Jump][]Jump, len(old.Jumps))
 			for _, oj := range old.Jumps {
-				oldByKey[jumpKey(oj)] = oj
+				key := jumpKey(oj)
+				oldByKey[key] = append(oldByKey[key], oj)
 			}
+			// 完全重复身份按出现顺序一对一消费，不让末跳覆盖首跳凭据。
 			for i := range p.Jumps {
-				if oj, ok := oldByKey[jumpKey(p.Jumps[i])]; ok {
+				key := jumpKey(p.Jumps[i])
+				if matches := oldByKey[key]; len(matches) > 0 {
+					oj := matches[0]
+					oldByKey[key] = matches[1:]
 					if p.Jumps[i].Password == "" {
 						p.Jumps[i].Password = oj.Password
 					}
@@ -528,13 +532,15 @@ func (s *Store) sealOpen(encoded string) (string, error) {
 	return string(plain), nil
 }
 
-// jumpKey 按连接目标标识一跳（与敏感字段无关），用于编辑时沿用旧凭据。
-func jumpKey(j Jump) string {
-	port := j.Port
-	if port == 0 {
-		port = 22
+// jumpKey 按完整凭据来源匹配跳板，避免换认证方式或私钥时沿用旧秘密。
+func jumpKey(j Jump) Jump {
+	if j.Port == 0 {
+		j.Port = 22
 	}
-	return j.Host + "\x00" + strconv.Itoa(port) + "\x00" + j.User
+	j.KeyPath = strings.TrimSpace(j.KeyPath)
+	j.Password = ""
+	j.Passphrase = ""
+	return j
 }
 
 func newID() (string, error) {
