@@ -152,32 +152,87 @@ body,
   padding: 0 2px;
 }
 
-.profile-item {
+/* 连接卡片：左侧信息 + 右侧主操作，底部状态与次级链接。 */
+.conn-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.conn-card {
   background: var(--card-bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
-  padding: 10px 12px !important;
-  margin-bottom: 8px;
+  padding: 10px 12px;
   transition: box-shadow 0.15s ease, border-color 0.15s ease;
 }
 
-.profile-item:hover {
+.conn-card:hover {
   box-shadow: var(--shadow-hover);
   border-color: var(--border-strong);
 }
 
-.profile-item .ant-list-item-meta {
-  margin-bottom: 0 !important;
+.conn-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
-.profile-item .ant-list-item-meta-title {
-  margin-bottom: 2px !important;
-  font-size: 13px;
+.conn-card-name {
+  flex: 1;
+  min-width: 0;
 }
 
-.profile-item .ant-list-item-action {
-  margin-left: 8px !important;
+.conn-name {
+  font-weight: 600;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 150px;
+}
+
+.conn-auth-tag {
+  font-size: 11px;
+  line-height: 18px;
+  padding: 0 6px;
+  margin: 0;
+}
+
+.conn-action {
+  flex: none;
+}
+
+.conn-card-addr {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--meta-fg);
+  font-family: Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conn-card-foot {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.conn-card-state {
+  font-size: 12px;
+}
+
+.conn-card-state .ant-badge-status-text {
+  font-size: 12px;
+}
+
+.conn-card-links a {
+  font-size: 12px;
+  margin-left: 10px;
 }
 
 .profile-addr {
@@ -477,9 +532,21 @@ body,
 }
 
 .fs-du {
+  display: flex;
+  align-items: center;
   font-size: 12px;
   color: var(--meta-fg);
   padding: 0 2px;
+}
+
+.fs-du-close {
+  cursor: pointer;
+  margin-left: 8px;
+  color: var(--meta-fg);
+}
+
+.fs-du-close:hover {
+  color: var(--accent);
 }
 
 /* 传输队列 */

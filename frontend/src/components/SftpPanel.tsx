@@ -17,6 +17,7 @@ import {
   ArrowLeftOutlined,
   ArrowRightOutlined,
   ArrowUpOutlined,
+  CloseOutlined,
   CopyOutlined,
   DeleteOutlined,
   EditOutlined,
@@ -29,6 +30,9 @@ import { invokeAs, describeError } from '../bridge'
 import { decodeText, encodeText } from '../b64'
 import { t } from '../i18n'
 import type { ConnectionInfo, FsEntry, ProfileView, TransferStatus } from '../types'
+
+type Side = 'left' | 'right'
+type PaneKind = 'local' | 'remote'
 
 interface Props {
   profiles: ProfileView[]
@@ -47,7 +51,6 @@ function fmtBytes(n: number): string {
   return n + ' B'
 }
 
-// 路径分段（面包屑）：Windows 盘符/UNC 与 POSIX 分别解析。
 function splitPathSegments(path: string, homeHint?: boolean): { label: string; full: string }[] {
   if (!path) return []
   if (path === '.' || path === './') return [{ label: homeHint ? '~' : '.', full: '.' }]
@@ -108,7 +111,7 @@ function PathBreadcrumb({
   )
 }
 
-// 一栏的浏览历史：index 用 ref 保证回调里读到最新值。
+// 一栏的浏览历史（index 用 ref，reset 用于切换本机/服务器时清空）。
 function useNavHistory() {
   const list = useRef<string[]>([])
   const idx = useRef(-1)
@@ -123,6 +126,11 @@ function useNavHistory() {
     idx.current = list.current.length - 1
     sync()
   }
+  const reset = () => {
+    list.current = []
+    idx.current = -1
+    sync()
+  }
   const back = (): string | null => {
     if (idx.current <= 0) return null
     idx.current--
@@ -135,58 +143,65 @@ function useNavHistory() {
     sync()
     return list.current[idx.current]
   }
-  return { push, back, forward, canBack, canForward }
+  return { push, reset, back, forward, canBack, canForward }
 }
 
 export function SftpPanel({ profiles, connections, onConnectionsChanged, initialRemotePath }: Props) {
+  // 对称双栏：左默认本机、右默认服务器（符合常见 FTP 客户端习惯）。
+  const [leftKind, setLeftKind] = useState<PaneKind>('local')
   const [leftProfileId, setLeftProfileId] = useState('')
-  const [rightProfileId, setRightProfileId] = useState('')
-  const [rightMode, setRightMode] = useState<'local' | 'remote'>('local')
-
-  const [leftPath, setLeftPath] = useState(initialRemotePath ?? '')
-  const [rightPath, setRightPath] = useState('')
-  const leftNav = useNavHistory()
-  const rightNav = useNavHistory()
-
+  const [leftPath, setLeftPath] = useState('')
   const [leftEntries, setLeftEntries] = useState<FsEntry[]>([])
+  const [leftSel, setLeftSel] = useState<FsEntry | null>(null)
   const [leftMore, setLeftMore] = useState(false)
   const [leftOffset, setLeftOffset] = useState(0)
-  const [leftSel, setLeftSel] = useState<FsEntry | null>(null)
+  const [editLeftPath, setEditLeftPath] = useState(false)
+  const leftNav = useNavHistory()
 
-  const [localEntries, setLocalEntries] = useState<FsEntry[]>([])
-  const [localSel, setLocalSel] = useState<FsEntry | null>(null)
-
+  const [rightKind, setRightKind] = useState<PaneKind>('remote')
+  const [rightProfileId, setRightProfileId] = useState('')
+  const [rightPath, setRightPath] = useState(initialRemotePath ?? '')
   const [rightEntries, setRightEntries] = useState<FsEntry[]>([])
   const [rightSel, setRightSel] = useState<FsEntry | null>(null)
+  const [rightMore, setRightMore] = useState(false)
+  const [rightOffset, setRightOffset] = useState(0)
+  const [editRightPath, setEditRightPath] = useState(false)
+  const rightNav = useNavHistory()
 
   const [transfers, setTransfers] = useState<TransferStatus[]>([])
-  const [preview, setPreview] = useState<{ path: string; content: string; dirty: string; side: 'left' | 'right' } | null>(null)
-  const [du, setDu] = useState<string | null>(null)
-  const [editLeftPath, setEditLeftPath] = useState(false)
-  const [editRightPath, setEditRightPath] = useState(false)
+  const [preview, setPreview] = useState<{ path: string; content: string; dirty: string; side: Side } | null>(null)
+  const [du, setDu] = useState<{ side: Side; text: string } | null>(null)
   const [busyProfile, setBusyProfile] = useState('')
-  const localHomeRef = useRef('')
 
-  const leftConn = connections.find(c => c.profileId === leftProfileId && c.state === 'ready' && c.alive)
-  const rightConn =
-    rightMode === 'remote'
-      ? connections.find(c => c.profileId === rightProfileId && c.state === 'ready' && c.alive)
-      : undefined
+  const leftConn = leftKind === 'remote'
+    ? connections.find(c => c.profileId === leftProfileId && c.state === 'ready' && c.alive)
+    : undefined
+  const rightConn = rightKind === 'remote'
+    ? connections.find(c => c.profileId === rightProfileId && c.state === 'ready' && c.alive)
+    : undefined
 
-  // 默认档案：优先已连接。
+  const profileOptions = useMemo(
+    () => profiles.map(p => ({
+      value: p.id,
+      label: `${p.name} · ${p.user}@${p.host}:${p.port}`,
+    })),
+    [profiles],
+  )
+
+  // 默认档案：左本机无需；右栏优先已连接。
   useEffect(() => {
     if (profiles.length === 0) return
-    if (!leftProfileId || !profiles.some(p => p.id === leftProfileId)) {
+    if (rightKind === 'remote' && (!rightProfileId || !profiles.some(p => p.id === rightProfileId))) {
       const ready = profiles.find(p => connections.some(c => c.profileId === p.id && c.state === 'ready' && c.alive))
-      setLeftProfileId((ready ?? profiles[0]).id)
+      setRightProfileId((ready ?? profiles[0]).id)
     }
-    if (rightMode === 'remote' && (!rightProfileId || !profiles.some(p => p.id === rightProfileId))) {
-      const other = profiles.find(p => p.id !== leftProfileId)
-      setRightProfileId(other?.id ?? '')
+    if (leftKind === 'remote' && (!leftProfileId || !profiles.some(p => p.id === leftProfileId))) {
+      const other = profiles.find(p => p.id !== rightProfileId) ?? profiles[0]
+      setLeftProfileId(other.id)
     }
-  }, [profiles, connections, leftProfileId, rightProfileId, rightMode])
+  }, [profiles, connections, rightKind, leftKind, rightProfileId, leftProfileId])
 
-  // 自动连接：未连接档案 → conn.open + 轮询 ready。
+  // 自动连接：选中的档案未连接时发起连接并轮询就绪。
   const ensureConn = useCallback(async (profileId: string) => {
     if (!profileId) return
     if (connections.some(c => c.profileId === profileId && c.state === 'ready' && c.alive)) return
@@ -227,86 +242,127 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
     }
   }, [connections, onConnectionsChanged])
 
-  // 左栏加载
-  const loadLeft = useCallback(async (path: string, offset = 0) => {
-    if (!leftConn) return
+  // 通用加载：远端走 sftp.list，本机走 fs.listLocal（空路径返回 home）。
+  const loadSide = useCallback(async (side: Side, path: string, offset = 0) => {
+    const kind = side === 'left' ? leftKind : rightKind
+    const conn = side === 'left' ? leftConn : rightConn
+    if (kind === 'remote' && !conn) return
     try {
+      if (kind === 'local') {
+        const res = await invokeAs<{ entries: FsEntry[]; home: string }>('fs.listLocal', { path })
+        if (side === 'left') {
+          setLeftEntries(res.entries ?? [])
+          if (!path && res.home) {
+            setLeftPath(res.home)
+            leftNav.push(res.home)
+          }
+        } else {
+          setRightEntries(res.entries ?? [])
+          if (!path && res.home) {
+            setRightPath(res.home)
+            rightNav.push(res.home)
+          }
+        }
+        return
+      }
       const res = await invokeAs<{ entries: FsEntry[]; more: boolean }>('sftp.list', {
-        connectionId: leftConn.connectionId, path: path || '.', offset, limit: 500,
+        connectionId: conn!.connectionId, path: path || '.', offset, limit: 500,
       })
-      if (offset === 0) setLeftEntries(res.entries ?? [])
-      else setLeftEntries(prev => [...prev, ...(res.entries ?? [])])
-      setLeftMore(res.more)
-      setLeftOffset(offset)
+      if (side === 'left') {
+        if (offset === 0) setLeftEntries(res.entries ?? [])
+        else setLeftEntries(prev => [...prev, ...(res.entries ?? [])])
+        setLeftMore(res.more)
+        setLeftOffset(offset)
+      } else {
+        if (offset === 0) setRightEntries(res.entries ?? [])
+        else setRightEntries(prev => [...prev, ...(res.entries ?? [])])
+        setRightMore(res.more)
+        setRightOffset(offset)
+      }
     } catch (e) {
       message.error(describeError(e))
     }
-  }, [leftConn])
-
-  const openLeft = useCallback((path: string) => {
-    setLeftPath(path)
-    setEditLeftPath(false)
-    leftNav.push(path)
-    void loadLeft(path, 0)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadLeft])
+  }, [leftKind, rightKind, leftConn, rightConn])
 
-  // 右栏加载（local / remote B）
-  const loadLocal = useCallback(async (path: string) => {
-    try {
-      const res = await invokeAs<{ entries: FsEntry[]; home: string }>('fs.listLocal', { path })
-      setLocalEntries(res.entries ?? [])
-      localHomeRef.current = res.home ?? ''
-      return res.home ?? ''
-    } catch (e) {
-      message.error(describeError(e))
-      return ''
+  // 打开路径（记录历史）。
+  const openSide = useCallback((side: Side, path: string) => {
+    if (side === 'left') {
+      setLeftPath(path)
+      setEditLeftPath(false)
+      leftNav.push(path)
+    } else {
+      setRightPath(path)
+      setEditRightPath(false)
+      rightNav.push(path)
     }
-  }, [])
-
-  const loadRight = useCallback(async (path: string) => {
-    if (!rightConn) return
-    try {
-      const res = await invokeAs<{ entries: FsEntry[] }>('sftp.list', {
-        connectionId: rightConn.connectionId, path: path || '.', offset: 0, limit: 500,
-      })
-      setRightEntries(res.entries ?? [])
-    } catch (e) {
-      message.error(describeError(e))
-    }
-  }, [rightConn])
-
-  const openRight = useCallback((path: string, push = true) => {
-    setRightPath(path)
-    setEditRightPath(false)
-    if (push) rightNav.push(path)
-    if (rightMode === 'local') void loadLocal(path)
-    else void loadRight(path)
+    void loadSide(side, path, 0)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rightMode, loadLocal, loadRight])
+  }, [loadSide])
 
-  // 档案切换 → 自动连接；连接就绪 → 载入目录。
-  useEffect(() => { if (leftProfileId) void ensureConn(leftProfileId) }, [leftProfileId, ensureConn])
-  useEffect(() => {
-    if (rightMode === 'remote' && rightProfileId) void ensureConn(rightProfileId)
-  }, [rightMode, rightProfileId, ensureConn])
-  useEffect(() => {
-    if (leftConn) openLeft(leftPath || '.')
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [leftConn?.connectionId])
-  useEffect(() => {
-    if (rightMode === 'remote') {
-      if (rightConn) openRight('.')
-    } else if (rightPath === '' || !rightPath) {
-      // 首次进入本机模式：加载用户主目录。
-      void loadLocal('').then(home => {
-        if (home) { setRightPath(home); rightNav.push(home) }
-      })
+  const navSide = (side: Side, dir: 'back' | 'forward') => {
+    const nav = side === 'left' ? leftNav : rightNav
+    const target = dir === 'back' ? nav.back() : nav.forward()
+    if (target == null) return
+    if (side === 'left') setLeftPath(target)
+    else setRightPath(target)
+    void loadSide(side, target, 0)
+  }
+
+  // 切换本机/服务器：清空该栏历史与内容，避免两边路径混入同一份历史。
+  const switchKind = (side: Side, kind: PaneKind) => {
+    if (side === 'left') {
+      setLeftKind(kind)
+      setLeftPath('')
+      setLeftEntries([])
+      setLeftSel(null)
+      leftNav.reset()
+      setDu(null)
+      if (kind === 'remote' && leftProfileId) void ensureConn(leftProfileId)
+      else if (kind === 'local') void loadSide('left', '', 0)
+    } else {
+      setRightKind(kind)
+      setRightPath('')
+      setRightEntries([])
+      setRightSel(null)
+      rightNav.reset()
+      if (kind === 'remote' && rightProfileId) void ensureConn(rightProfileId)
+      else if (kind === 'local') void loadSide('right', '', 0)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rightMode, rightConn?.connectionId])
+  }
 
-  const peerSame = rightMode === 'remote' && leftProfileId !== '' && leftProfileId === rightProfileId
+  // 连接就绪 / 模式切换后加载目录。
+  useEffect(() => {
+    if (leftKind === 'remote' && leftConn) {
+      openSide('left', leftPath || '.')
+    } else if (leftKind === 'local' && leftEntries.length === 0) {
+      void loadSide('left', '', 0)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [leftConn?.connectionId, leftKind])
+  useEffect(() => {
+    if (rightKind === 'remote') {
+      if (rightProfileId) void ensureConn(rightProfileId)
+      if (rightConn) openSide('right', rightPath || '.')
+    } else if (rightEntries.length === 0) {
+      void loadSide('right', '', 0)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rightConn?.connectionId, rightKind, rightProfileId])
+  useEffect(() => {
+    if (leftKind === 'remote' && leftProfileId) void ensureConn(leftProfileId)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [leftKind, leftProfileId])
+  useEffect(() => {
+    // 终端目录跟随：刷新右侧远程（默认栏）到新目录。
+    if (initialRemotePath && rightKind === 'remote' && rightConn) {
+      openSide('right', initialRemotePath)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialRemotePath])
+
+  const peerSame = leftKind === 'remote' && rightKind === 'remote' && leftProfileId !== '' && leftProfileId === rightProfileId
 
   // 传输队列轮询（链式，防堆积）。
   useEffect(() => {
@@ -329,38 +385,40 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
     return () => { stopped = true; clearTimeout(timer) }
   }, [])
 
-  // 传输：本机 ↔ 远端 / 远端 ↔ 远端。
-  const transferToPeer = async (side: 'left' | 'right') => {
+  // 把 from 栏选中项送到对侧：本地↔远端 / 远端↔远端。
+  const sendToPeer = async (from: Side) => {
     if (peerSame) { message.warning(t('sftp.peerSame')); return }
-    const sel = side === 'left' ? leftSel : (rightMode === 'local' ? localSel : rightSel)
-    if (!sel || sel.isDir) { message.warning(t('sftp.sendToPeer')); return }
-    if (!leftConn) return
+    const srcSel = from === 'left' ? leftSel : rightSel
+    const srcKind = from === 'left' ? leftKind : rightKind
+    const dstKind = from === 'left' ? rightKind : leftKind
+    const srcConn = from === 'left' ? leftConn : rightConn
+    const dstConn = from === 'left' ? rightConn : leftConn
+    const dstPath = from === 'left' ? rightPath : leftPath
+    if (!srcSel || srcSel.isDir) { message.warning(t('sftp.sendToPeer')); return }
+    if (srcKind === 'local' && dstKind === 'local') {
+      message.warning(t('sftp.sendToPeer'))
+      return
+    }
     try {
-      if (side === 'left') {
-        if (rightMode === 'local') {
-          await invokeAs('transfer.start', {
-            connectionId: leftConn.connectionId, direction: 'download',
-            remotePath: sel.path, localPath: joinLocal(rightPath, sel.name),
-          })
-        } else if (rightConn) {
-          await invokeAs('transfer.start', {
-            connectionId: leftConn.connectionId, direction: 'serverToServer',
-            remotePath: sel.path,
-            targetConnectionId: rightConn.connectionId,
-            targetPath: joinRemote(rightPath, sel.name),
-          })
-        }
-      } else if (rightMode === 'local') {
+      if (srcKind === 'local' && dstKind === 'remote') {
+        if (!dstConn) return
         await invokeAs('transfer.start', {
-          connectionId: leftConn.connectionId, direction: 'upload',
-          localPath: sel.path, remotePath: joinRemote(leftPath, sel.name),
+          connectionId: dstConn.connectionId, direction: 'upload',
+          localPath: srcSel.path, remotePath: joinRemote(dstPath, srcSel.name),
         })
-      } else if (rightConn) {
+      } else if (srcKind === 'remote' && dstKind === 'local') {
+        if (!srcConn) return
         await invokeAs('transfer.start', {
-          connectionId: rightConn.connectionId, direction: 'serverToServer',
-          remotePath: sel.path,
-          targetConnectionId: leftConn.connectionId,
-          targetPath: joinRemote(leftPath, sel.name),
+          connectionId: srcConn.connectionId, direction: 'download',
+          remotePath: srcSel.path, localPath: joinLocal(dstPath, srcSel.name),
+        })
+      } else {
+        if (!srcConn || !dstConn) return
+        await invokeAs('transfer.start', {
+          connectionId: srcConn.connectionId, direction: 'serverToServer',
+          remotePath: srcSel.path,
+          targetConnectionId: dstConn.connectionId,
+          targetPath: joinRemote(dstPath, srcSel.name),
         })
       }
       message.success(t('sftp.sendToPeer'))
@@ -369,36 +427,40 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
     }
   }
 
-  const uploadFromPicker = async () => {
-    if (!leftConn) return
-    const pickFile = window.gonaviPlugin?.pickFile?.bind(window.gonaviPlugin)
-    if (pickFile) {
-      try {
-        const picked = await pickFile({ title: t('sftp.upload') })
-        if (picked === null) return
-        if (picked) {
-          const name = picked.split(/[\\/]/).pop() || 'file'
-          await invokeAs('transfer.start', {
-            connectionId: leftConn.connectionId, direction: 'upload',
-            localPath: picked, remotePath: joinRemote(leftPath, name),
-          })
-          message.success(t('state.upload'))
-          return
-        }
-      } catch (e) {
-        message.error(describeError(e))
-        return
-      }
+  // 本机栏上传按钮：原生选择器选文件后送入对侧远端（对侧须为服务器）。
+  const uploadFromPicker = async (side: Side) => {
+    const dstConn = side === 'left' ? rightConn : leftConn
+    const dstPath = side === 'left' ? rightPath : leftPath
+    const dstKind = side === 'left' ? rightKind : leftKind
+    if (dstKind !== 'remote' || !dstConn) {
+      message.warning(t('sftp.sendToPeer'))
+      return
     }
-    await transferToPeer('right')
+    const pickFile = window.gonaviPlugin?.pickFile?.bind(window.gonaviPlugin)
+    if (!pickFile) { await sendToPeer(side); return }
+    try {
+      const picked = await pickFile({ title: t('sftp.upload') })
+      if (picked === null) return
+      if (!picked) { await sendToPeer(side); return }
+      const name = picked.split(/[\\/]/).pop() || 'file'
+      await invokeAs('transfer.start', {
+        connectionId: dstConn.connectionId, direction: 'upload',
+        localPath: picked, remotePath: joinRemote(dstPath, name),
+      })
+      message.success(t('state.upload'))
+    } catch (e) {
+      message.error(describeError(e))
+    }
   }
 
-  const doPreview = async (entry: FsEntry, side: 'left' | 'right') => {
+  const doPreview = async (entry: FsEntry, side: Side) => {
     const conn = side === 'left' ? leftConn : rightConn
-    if (!conn) return
+    const kind = side === 'left' ? leftKind : rightKind
+    if (kind === 'remote' && !conn) return
+    if (kind === 'local') return // 本地不提供预览编辑（避免误改本机文件）
     try {
       const res = await invokeAs<{ dataBase64: string }>('sftp.preview', {
-        connectionId: conn.connectionId, path: entry.path, maxBytes: 262144,
+        connectionId: conn!.connectionId, path: entry.path, maxBytes: 262144,
       })
       const text = decodeText(res.dataBase64)
       const nul = [...text].filter(c => c === '\u0000').length
@@ -438,248 +500,217 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
       })
     })
 
-  const remoteAction = async (action: string, args: Record<string, unknown>) => {
-    if (!leftConn) return
+  const remoteAction = async (side: Side, action: string, args: Record<string, unknown>) => {
+    const conn = side === 'left' ? leftConn : rightConn
+    if (!conn) return
     try {
-      await invokeAs(action, { connectionId: leftConn.connectionId, ...args })
-      void loadLeft(leftPath, 0)
+      await invokeAs(action, { connectionId: conn.connectionId, ...args })
+      void loadSide(side, side === 'left' ? leftPath : rightPath, 0)
     } catch (e) {
       message.error(describeError(e))
     }
   }
 
-  const showDu = async () => {
-    if (!leftConn) return
+  // 磁盘用量：作用于点击的远程栏；再点一次（或点关闭）收起。
+  const showDu = async (side: Side) => {
+    if (du && du.side === side) {
+      setDu(null)
+      return
+    }
+    const conn = side === 'left' ? leftConn : rightConn
+    const path = side === 'left' ? leftPath : rightPath
+    if (!conn) return
     try {
       const res = await invokeAs<{ totalBytes: number; availBytes: number }>('sftp.du', {
-        connectionId: leftConn.connectionId, path: leftPath,
+        connectionId: conn.connectionId, path,
       })
-      setDu(`${leftPath}: ${fmtBytes(res.totalBytes - res.availBytes)} / ${fmtBytes(res.totalBytes)}`)
+      setDu({ side, text: `${path}: ${fmtBytes(res.totalBytes - res.availBytes)} / ${fmtBytes(res.totalBytes)}` })
     } catch (e) {
-      setDu(describeError(e))
+      setDu({ side, text: describeError(e) })
     }
   }
 
   const copyPath = async (path: string) => {
-    const full = path || localHomeRef.current
-    if (!full) return
+    if (!path) return
     try {
-      await navigator.clipboard.writeText(full)
-      message.success(`${t('sftp.copyPath')}: ${full}`)
+      await navigator.clipboard.writeText(path)
+      message.success(`${t('sftp.copyPath')}: ${path}`)
     } catch {
-      message.warning(full)
+      message.warning(path)
     }
   }
-
-  const entryList = (
-    entries: FsEntry[],
-    selected: FsEntry | null,
-    onSelect: (e: FsEntry) => void,
-    onOpen: (e: FsEntry) => void,
-    more?: { show: boolean; onLoad: () => void },
-  ) => (
-    <List
-      size="small"
-      className="fs-list"
-      dataSource={entries}
-      renderItem={e => (
-        <List.Item
-          className={`fs-item ${selected?.path === e.path ? 'fs-selected' : ''}`}
-          onClick={() => onSelect(e)}
-          onDoubleClick={() => onOpen(e)}
-        >
-          <span className="fs-icon">{e.isDir ? '📁' : e.isLink ? '🔗' : '📄'}</span>
-          <span className="fs-name" title={e.name}>{e.name}</span>
-          <span className="fs-meta">{e.isDir ? '' : fmtBytes(e.size)}</span>
-        </List.Item>
-      )}
-      footer={more?.show ? <Button size="small" type="link" onClick={more.onLoad}>more…</Button> : undefined}
-    />
-  )
-
-  const profileOptions = useMemo(
-    () => profiles.map(p => ({
-      value: p.id,
-      label: `${p.name} · ${p.user}@${p.host}:${p.port}`,
-    })),
-    [profiles],
-  )
 
   if (profiles.length === 0) {
     return <div className="empty-hint">{t('sftp.noProfiles')}</div>
   }
 
-  const rightEntriesView = rightMode === 'local' ? localEntries : rightEntries
-  const rightSelected = rightMode === 'local' ? localSel : rightSel
-  const rightSubject = rightMode === 'local' ? (localHomeRef.current || t('sftp.computer')) : (rightConn?.addr ?? '')
+  // 一栏的完整渲染（纯展示，状态由主组件持有）。
+  const renderPane = (side: Side) => {
+    const kind = side === 'left' ? leftKind : rightKind
+    const profileId = side === 'left' ? leftProfileId : rightProfileId
+    const conn = side === 'left' ? leftConn : rightConn
+    const path = side === 'left' ? leftPath : rightPath
+    const entries = side === 'left' ? leftEntries : rightEntries
+    const sel = side === 'left' ? leftSel : rightSel
+    const nav = side === 'left' ? leftNav : rightNav
+    const more = side === 'left' ? leftMore : rightMore
+    const offset = side === 'left' ? leftOffset : rightOffset
+    const editing = side === 'left' ? editLeftPath : editRightPath
+    const isLocal = kind === 'local'
+
+    return (
+      <div className={`fs-pane ${isLocal ? 'fs-pane-local' : 'fs-pane-remote'}`}>
+        <div className="fs-pane-head">
+          <Space size={6} className="pane-title">
+            <Segmented
+              size="small"
+              value={kind}
+              onChange={v => switchKind(side, v as PaneKind)}
+              options={[
+                { label: t('sftp.modeLocal'), value: 'local' },
+                { label: t('sftp.modeRemote'), value: 'remote' },
+              ]}
+            />
+            {isLocal ? (
+              <Tag color="green" style={{ marginRight: 0 }}>{t('sftp.local')}</Tag>
+            ) : (
+              <Select
+                size="small"
+                value={profileId || undefined}
+                placeholder={t('sftp.pickProfile')}
+                style={{ minWidth: side === 'left' ? 160 : 180 }}
+                options={profileOptions}
+                onChange={v => {
+                  if (side === 'left') setLeftProfileId(v)
+                  else setRightProfileId(v)
+                }}
+                loading={busyProfile === profileId}
+                status={peerSame ? 'error' : undefined}
+              />
+            )}
+          </Space>
+          <Space size={4} wrap>
+            <Button size="small" icon={<ArrowLeftOutlined />} disabled={!nav.canBack}
+              title={t('sftp.back')} onClick={() => navSide(side, 'back')} />
+            <Button size="small" icon={<ArrowRightOutlined />} disabled={!nav.canForward}
+              title={t('sftp.forward')} onClick={() => navSide(side, 'forward')} />
+            <Button size="small" icon={<RollbackOutlined />} title={t('sftp.parent')}
+              onClick={() => openSide(side, isLocal ? parentLocal(path) : parentRemote(path))} />
+            <Button size="small" icon={<ReloadOutlined />} title={t('sftp.refresh')}
+              onClick={() => loadSide(side, path, 0)} />
+            {isLocal ? (
+              <Button size="small" icon={<ArrowUpOutlined />} title={t('sftp.upload')}
+                disabled={!(side === 'left' ? rightConn : leftConn)}
+                onClick={() => uploadFromPicker(side)} />
+            ) : (
+              <>
+                <Button size="small" icon={<FolderAddOutlined />} title={t('sftp.mkdir')}
+                  onClick={async () => {
+                    const name = await simplePrompt(t('sftp.mkdir'))
+                    if (name) await remoteAction(side, 'sftp.mkdir', { path: joinRemote(path, name) })
+                  }} />
+                <Button size="small" icon={<DeleteOutlined />} title={t('sftp.remove')} danger
+                  disabled={!sel}
+                  onClick={async () => {
+                    if (!sel) return
+                    if (sel.isDir) await remoteAction(side, 'sftp.removeRecursive', { path: sel.path })
+                    else await remoteAction(side, 'sftp.remove', { path: sel.path })
+                  }} />
+                <Button size="small" onClick={() => showDu(side)} disabled={!conn}>{t('sftp.du')}</Button>
+              </>
+            )}
+            <Button size="small" icon={<SwapOutlined />} title={t('sftp.sendToPeer')}
+              disabled={isLocal ? !(side === 'left' ? rightConn : leftConn) : !conn}
+              onClick={() => sendToPeer(side)} />
+          </Space>
+        </div>
+        {editing ? (
+          <Input
+            size="small"
+            autoFocus
+            value={path}
+            onChange={e => {
+              if (side === 'left') setLeftPath(e.target.value)
+              else setRightPath(e.target.value)
+            }}
+            onPressEnter={() => openSide(side, path)}
+            onBlur={() => {
+              if (side === 'left') setEditLeftPath(false)
+              else setEditRightPath(false)
+            }}
+          />
+        ) : (
+          <div className="path-bar">
+            {isLocal ? (
+              <PathBreadcrumb
+                path={path}
+                emptyLabel={t('sftp.computer')}
+                onNavigate={p => openSide(side, p)}
+              />
+            ) : conn ? (
+              <PathBreadcrumb path={path || '.'} homeHint onNavigate={p => openSide(side, p)} />
+            ) : (
+              <span className="crumb root">
+                {busyProfile === profileId ? t('sftp.connecting') : t('sftp.pickProfile')}
+              </span>
+            )}
+            <Tooltip title={t('sftp.copyPath')}>
+              <CopyOutlined className="path-edit" onClick={() => copyPath(path)} />
+            </Tooltip>
+            <EditOutlined
+              className="path-edit"
+              title={t('sftp.editPath')}
+              onClick={() => {
+                if (side === 'left') setEditLeftPath(true)
+                else setEditRightPath(true)
+              }}
+            />
+          </div>
+        )}
+        {du && du.side === side && (
+          <div className="fs-du">
+            <span>{du.text}</span>
+            <CloseOutlined className="fs-du-close" onClick={() => setDu(null)} />
+          </div>
+        )}
+        <div className="fs-scroll">
+          <List
+            size="small"
+            className="fs-list"
+            dataSource={entries}
+            renderItem={e => (
+              <List.Item
+                className={`fs-item ${sel?.path === e.path ? 'fs-selected' : ''}`}
+                onClick={() => {
+                  if (side === 'left') setLeftSel(e)
+                  else setRightSel(e)
+                }}
+                onDoubleClick={() => {
+                  if (e.isDir) openSide(side, e.path)
+                  else if (!isLocal) void doPreview(e, side)
+                }}
+              >
+                <span className="fs-icon">{e.isDir ? '📁' : e.isLink ? '🔗' : '📄'}</span>
+                <span className="fs-name" title={e.name}>{e.name}</span>
+                <span className="fs-meta">{e.isDir ? '' : fmtBytes(e.size)}</span>
+              </List.Item>
+            )}
+            footer={
+              more ? (
+                <Button size="small" type="link" onClick={() => loadSide(side, path, offset + 500)}>more…</Button>
+              ) : undefined
+            }
+          />
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="sftp-wrap">
       <div className="sftp-columns">
-        {/* 左栏：远程 A */}
-        <div className="fs-pane fs-pane-remote">
-          <div className="fs-pane-head">
-            <Space size={6} className="pane-title">
-              <Tag color="blue" style={{ marginRight: 0 }}>{t('sftp.remote')}</Tag>
-              <Select
-                size="small"
-                value={leftProfileId || undefined}
-                placeholder={t('sftp.pickProfile')}
-                style={{ minWidth: 190 }}
-                options={profileOptions}
-                onChange={setLeftProfileId}
-                loading={busyProfile === leftProfileId}
-              />
-            </Space>
-            <Space size={4} wrap>
-              <Button size="small" icon={<ArrowLeftOutlined />} disabled={!leftNav.canBack}
-                title={t('sftp.back')} onClick={() => { const p = leftNav.back(); if (p !== null) openLeft(p) }} />
-              <Button size="small" icon={<ArrowRightOutlined />} disabled={!leftNav.canForward}
-                title={t('sftp.forward')} onClick={() => { const p = leftNav.forward(); if (p !== null) openLeft(p) }} />
-              <Button size="small" icon={<RollbackOutlined />} title={t('sftp.parent')}
-                onClick={() => openLeft(parentRemote(leftPath))} />
-              <Button size="small" icon={<ReloadOutlined />} title={t('sftp.refresh')}
-                onClick={() => loadLeft(leftPath, 0)} />
-              <Button size="small" icon={<FolderAddOutlined />} title={t('sftp.mkdir')}
-                onClick={async () => {
-                  const name = await simplePrompt(t('sftp.mkdir'))
-                  if (name) await remoteAction('sftp.mkdir', { path: joinRemote(leftPath, name) })
-                }} />
-              <Button size="small" icon={<SwapOutlined />} title={t('sftp.sendToPeer')}
-                disabled={!leftConn} onClick={() => transferToPeer('left')} />
-              <Button size="small" icon={<DeleteOutlined />} title={t('sftp.remove')} danger
-                disabled={!leftSel}
-                onClick={async () => {
-                  if (!leftSel) return
-                  if (leftSel.isDir) await remoteAction('sftp.removeRecursive', { path: leftSel.path })
-                  else await remoteAction('sftp.remove', { path: leftSel.path })
-                }} />
-              <Button size="small" onClick={showDu} disabled={!leftConn}>{t('sftp.du')}</Button>
-            </Space>
-          </div>
-          {editLeftPath ? (
-            <Input
-              size="small"
-              autoFocus
-              value={leftPath}
-              onChange={e => setLeftPath(e.target.value)}
-              onPressEnter={() => openLeft(leftPath)}
-              onBlur={() => setEditLeftPath(false)}
-            />
-          ) : (
-            <div className="path-bar">
-              {leftConn ? (
-                <PathBreadcrumb path={leftPath || '.'} homeHint onNavigate={openLeft} />
-              ) : (
-                <span className="crumb root">
-                  {busyProfile === leftProfileId ? t('sftp.connecting') : t('sftp.pickProfile')}
-                </span>
-              )}
-              <Tooltip title={t('sftp.copyPath')}>
-                <CopyOutlined className="path-edit" onClick={() => copyPath(leftPath || '.')} />
-              </Tooltip>
-              <EditOutlined className="path-edit" title={t('sftp.editPath')} onClick={() => setEditLeftPath(true)} />
-            </div>
-          )}
-          {du && <div className="fs-du">{du}</div>}
-          <div className="fs-scroll">
-            {entryList(leftEntries, leftSel, setLeftSel, e => {
-              if (e.isDir) openLeft(e.path)
-              else void doPreview(e, 'left')
-            }, { show: leftMore, onLoad: () => loadLeft(leftPath, leftOffset + 500) })}
-          </div>
-        </div>
-
-        {/* 右栏：本机 / 远程 B */}
-        <div className={`fs-pane ${rightMode === 'local' ? 'fs-pane-local' : 'fs-pane-remote'}`}>
-          <div className="fs-pane-head">
-            <Space size={6} className="pane-title">
-              <Segmented
-                size="small"
-                value={rightMode}
-                onChange={v => {
-                  setRightMode(v as 'local' | 'remote')
-                  setRightPath('')
-                }}
-                options={[
-                  { label: t('sftp.modeLocal'), value: 'local' },
-                  { label: t('sftp.modeRemote'), value: 'remote' },
-                ]}
-              />
-              {rightMode === 'local' ? (
-                <Tag color="green" style={{ marginRight: 0 }}>{t('sftp.local')}</Tag>
-              ) : (
-                <Select
-                  size="small"
-                  value={rightProfileId || undefined}
-                  placeholder={t('sftp.pickProfile')}
-                  style={{ minWidth: 170 }}
-                  options={profileOptions}
-                  onChange={setRightProfileId}
-                  loading={busyProfile === rightProfileId}
-                  status={peerSame ? 'error' : undefined}
-                />
-              )}
-            </Space>
-            <Space size={4} wrap>
-              <Button size="small" icon={<ArrowLeftOutlined />} disabled={!rightNav.canBack}
-                title={t('sftp.back')} onClick={() => { const p = rightNav.back(); if (p !== null) openRight(p) }} />
-              <Button size="small" icon={<ArrowRightOutlined />} disabled={!rightNav.canForward}
-                title={t('sftp.forward')} onClick={() => { const p = rightNav.forward(); if (p !== null) openRight(p) }} />
-              <Button size="small" icon={<RollbackOutlined />} title={t('sftp.parent')}
-                onClick={() => openRight(rightMode === 'local' ? parentLocal(rightPath) : parentRemote(rightPath))} />
-              <Button size="small" icon={<ReloadOutlined />} title={t('sftp.refresh')}
-                onClick={() => (rightMode === 'local' ? loadLocal(rightPath) : loadRight(rightPath))} />
-              {rightMode === 'local' ? (
-                <Button size="small" icon={<ArrowUpOutlined />} title={t('sftp.upload')}
-                  disabled={!leftConn} onClick={uploadFromPicker} />
-              ) : (
-                <Button size="small" icon={<SwapOutlined />} title={t('sftp.sendToPeer')}
-                  disabled={!rightConn || peerSame} onClick={() => transferToPeer('right')} />
-              )}
-            </Space>
-          </div>
-          {editRightPath ? (
-            <Input
-              size="small"
-              autoFocus
-              value={rightPath}
-              onChange={e => setRightPath(e.target.value)}
-              onPressEnter={() => openRight(rightPath)}
-              onBlur={() => setEditRightPath(false)}
-            />
-          ) : (
-            <div className="path-bar">
-              {rightMode === 'remote' && !rightConn ? (
-                <span className="crumb root">
-                  {busyProfile === rightProfileId ? t('sftp.connecting') : t('sftp.pickProfile')}
-                </span>
-              ) : (
-                <PathBreadcrumb
-                  path={rightPath}
-                  emptyLabel={rightSubject || t('sftp.computer')}
-                  homeHint={rightMode === 'remote'}
-                  onNavigate={openRight}
-                />
-              )}
-              <Tooltip title={t('sftp.copyPath')}>
-                <CopyOutlined className="path-edit" onClick={() => copyPath(rightPath)} />
-              </Tooltip>
-              <EditOutlined className="path-edit" title={t('sftp.editPath')} onClick={() => setEditRightPath(true)} />
-            </div>
-          )}
-          <div className="fs-scroll">
-            {entryList(
-              rightEntriesView,
-              rightSelected,
-              e => (rightMode === 'local' ? setLocalSel(e) : setRightSel(e)),
-              e => {
-                if (e.isDir) openRight(e.path)
-                else if (rightMode === 'remote') void doPreview(e, 'right')
-              },
-            )}
-          </div>
-        </div>
+        {renderPane('left')}
+        {renderPane('right')}
       </div>
 
       <div className="transfers-pane">

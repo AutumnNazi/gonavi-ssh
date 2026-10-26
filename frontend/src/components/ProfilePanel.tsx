@@ -7,7 +7,6 @@ import {
   Form,
   Input,
   InputNumber,
-  List,
   Modal,
   Popconfirm,
   Select,
@@ -251,56 +250,54 @@ export function ProfilePanel({
       {profiles.length === 0 ? (
         <Empty description={t('conn.empty')} style={{ marginTop: 48 }} />
       ) : (
-        <List
-          dataSource={profiles}
-          renderItem={p => {
+        <div className="conn-cards">
+          {profiles.map(p => {
             const conn = connByProfile.get(p.id)
             const ready = conn?.state === 'ready'
+            const pending = conn?.state === 'connecting' || conn?.state === 'needInput'
             return (
-              <List.Item
-                className="profile-item"
-                actions={[
-                  ready ? (
-                    <Button key="dis" size="small" danger ghost onClick={() => disconnect(conn!)}>
+              <div key={p.id} className="conn-card">
+                <div className="conn-card-head">
+                  <Space size={6} className="conn-card-name">
+                    <span className="conn-name">{p.name}</span>
+                    <Tag bordered={false} className="conn-auth-tag">{t(`auth.${p.authMethod}`)}</Tag>
+                    {(p.jumps?.length ?? 0) > 0 && (
+                      <Tag bordered={false} color="geekblue" className="conn-auth-tag">{`⇢ ${p.jumps!.length}`}</Tag>
+                    )}
+                  </Space>
+                  {ready ? (
+                    <Button size="small" danger ghost className="conn-action" onClick={() => disconnect(conn!)}>
                       {t('conn.disconnect')}
                     </Button>
                   ) : (
                     <Button
-                      key="con"
                       size="small"
                       type="primary"
                       ghost
-                      loading={conn?.state === 'connecting' || conn?.state === 'needInput'}
+                      className="conn-action"
+                      loading={pending}
                       onClick={() => onConnect(p)}
                     >
                       {t('conn.connect')}
                     </Button>
-                  ),
-                ]}
-              >
-                <List.Item.Meta
-                  title={
-                    <Space size={6}>
-                      <span>{p.name}</span>
-                      <Tag style={{ marginRight: 0 }}>{t(`auth.${p.authMethod}`)}</Tag>
-                      {(p.jumps?.length ?? 0) > 0 && <Tag color="geekblue">{`⇢ ${p.jumps!.length}`}</Tag>}
-                    </Space>
-                  }
-                  description={
-                    <span className="profile-addr">
-                      {p.user}@{p.host}:{p.port}
-                      <div>{stateBadge(conn)}</div>
-                      <a className="profile-edit" onClick={() => openForm(p)}>{t('conn.edit')}</a>
-                      <Popconfirm title={`${t('conn.delete')} ${p.name}?`} onConfirm={() => deleteProfile(p)}>
-                        <a className="profile-del">{t('conn.delete')}</a>
-                      </Popconfirm>
-                    </span>
-                  }
-                />
-              </List.Item>
+                  )}
+                </div>
+                <div className="conn-card-addr">
+                  {p.user}@{p.host}:{p.port}
+                </div>
+                <div className="conn-card-foot">
+                  <span className="conn-card-state">{stateBadge(conn)}</span>
+                  <span className="conn-card-links">
+                    <a onClick={() => openForm(p)}>{t('conn.edit')}</a>
+                    <Popconfirm title={`${t('conn.delete')} ${p.name}?`} onConfirm={() => deleteProfile(p)}>
+                      <a className="profile-del">{t('conn.delete')}</a>
+                    </Popconfirm>
+                  </span>
+                </div>
+              </div>
             )
-          }}
-        />
+          })}
+        </div>
       )}
 
       <Modal
