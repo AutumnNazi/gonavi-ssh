@@ -6,7 +6,6 @@ import {
   message,
   Modal,
   Progress,
-  Segmented,
   Select,
   Space,
   Tag,
@@ -562,34 +561,41 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
     return (
       <div className={`fs-pane ${isLocal ? 'fs-pane-local' : 'fs-pane-remote'}`}>
         <div className="fs-pane-head">
-          <Segmented
+          <Select
             size="small"
-            value={kind}
-            onChange={v => switchKind(side, v as PaneKind)}
+            className="pane-source"
+            value={isLocal ? 'local' : profileId || undefined}
+            placeholder={t('sftp.pickProfile')}
+            style={{ flex: 1, minWidth: 140, maxWidth: 250 }}
             options={[
-              { label: t('sftp.modeLocal'), value: 'local' },
-              { label: t('sftp.modeRemote'), value: 'remote' },
+              { value: 'local', label: `🖥 ${t('sftp.modeLocal')}` },
+              ...profileOptions,
             ]}
+            onChange={v => {
+              if (v === 'local') {
+                switchKind(side, 'local')
+                return
+              }
+              // 切换服务器：清空该栏状态，避免把本地路径带到远端。
+              if (side === 'left') {
+                setLeftKind('remote')
+                setLeftProfileId(v)
+                setLeftPath('')
+                setLeftEntries([])
+                setLeftSel(null)
+                leftNav.reset()
+              } else {
+                setRightKind('remote')
+                setRightProfileId(v)
+                setRightPath('')
+                setRightEntries([])
+                setRightSel(null)
+                rightNav.reset()
+              }
+            }}
+            loading={busyProfile === profileId}
+            status={peerSame ? 'error' : undefined}
           />
-          {isLocal ? (
-            <Tag color="green" style={{ marginRight: 0 }}>{t('sftp.local')}</Tag>
-          ) : (
-            <Select
-              size="small"
-              value={profileId || undefined}
-              placeholder={t('sftp.pickProfile')}
-              style={{ flex: 1, minWidth: 150, maxWidth: 260 }}
-              options={profileOptions}
-              onChange={v => {
-                if (side === 'left') setLeftProfileId(v)
-                else setRightProfileId(v)
-              }}
-              loading={busyProfile === profileId}
-              status={peerSame ? 'error' : undefined}
-            />
-          )}
-        </div>
-        <div className="pane-toolbar">
           <Space size={4} wrap>
             <Button size="small" icon={<ArrowLeftOutlined />} disabled={!nav.canBack}
               title={t('sftp.back')} onClick={() => navSide(side, 'back')} />

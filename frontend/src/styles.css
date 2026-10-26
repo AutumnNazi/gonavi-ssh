@@ -392,6 +392,7 @@ body,
   justify-content: space-between;
   gap: 6px;
   padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
 }
 
 .fs-pane-remote .fs-pane-head {
@@ -406,15 +407,13 @@ body,
   padding-top: 6px;
 }
 
-.pane-toolbar {
-  display: flex;
-  align-items: center;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--border);
+/* 头部单行：主机选择器自适应 + 工具按钮组靠右。 */
+.fs-pane-head .ant-space {
+  flex: none;
 }
 
-.pane-toolbar .ant-space {
-  width: 100%;
+.pane-source .ant-select-selector {
+  border-radius: var(--radius-sm) !important;
 }
 
 .pane-subject {
