@@ -5,6 +5,16 @@
 type Dict = Record<string, string>
 
 const zhCN: Dict = {
+  "conn.statusInvalid": "连接状态响应无效，档案已保留，请刷新后重试。",
+  "conn.selectAll": "全选",
+  "conn.selectProfile": "选择 {name}",
+  "conn.selectedCount": "已选 {count} 项",
+  "conn.deleteSelected": "删除所选",
+  "conn.deleteSelectedConfirm": "确定删除选中的 {count} 个连接档案？",
+  "conn.deleteProfilesOnly": "已连接或正在认证的档案会先断开或取消。仅删除连接档案，不删除远端文件；处理失败的档案将保留。",
+  "conn.deleteStillActive": "连接或认证尚未结束，档案已保留，请稍后重试。",
+  "conn.deletedCount": "已删除 {count} 个连接档案",
+  "conn.deleteFailedCount": "{count} 个档案处理失败，已保留",
   'app.title': 'GoNavi SSH',
   'tab.terminals': '终端',
   'tab.files': '文件',
@@ -51,6 +61,12 @@ const zhCN: Dict = {
   'term.ended': '会话已结束',
   'term.exitCode': '进程退出，退出码 {code}',
   'term.broadcast': '广播输入',
+  'term.broadcastScope': '仅广播到当前 SSH 连接的终端，不跨服务器；键入、粘贴、快捷命令和 Ctrl+C 中断均会一起发送。',
+  'term.selectionHelp': '拖拽选择文本；vim/tmux 鼠标模式请按住 Shift 拖拽。选中后 Ctrl+C / Ctrl+Shift+C 复制。',
+  'term.copy': '复制',
+  'term.copied': '已复制选中文本',
+  'term.copyFailed': '复制失败，请允许剪贴板写入权限后重试。',
+  'term.pasteFailed': '粘贴失败，请允许剪贴板读取权限后重试。',
   'term.history': '历史命令',
   'term.quick': '快速命令',
   'term.ctrlc': 'Ctrl+C',
@@ -109,6 +125,16 @@ const zhCN: Dict = {
 }
 
 const zhTW: Dict = {
+  "conn.statusInvalid": "連線狀態回應無效，設定檔已保留，請重新整理後重試。",
+  "conn.selectAll": "全選",
+  "conn.selectProfile": "選取 {name}",
+  "conn.selectedCount": "已選 {count} 項",
+  "conn.deleteSelected": "刪除所選",
+  "conn.deleteSelectedConfirm": "確定刪除選取的 {count} 個連線設定檔？",
+  "conn.deleteProfilesOnly": "已連線或正在驗證的設定檔會先中斷或取消。僅刪除連線設定檔，不刪除遠端檔案；處理失敗的設定檔將保留。",
+  "conn.deleteStillActive": "連線或驗證尚未結束，設定檔已保留，請稍後重試。",
+  "conn.deletedCount": "已刪除 {count} 個連線設定檔",
+  "conn.deleteFailedCount": "{count} 個設定檔處理失敗，已保留",
   'app.title': 'GoNavi SSH',
   'tab.terminals': '終端機',
   'tab.files': '檔案',
@@ -155,6 +181,12 @@ const zhTW: Dict = {
   'term.ended': '連線階段已結束',
   'term.exitCode': '程序結束，結束碼 {code}',
   'term.broadcast': '廣播輸入',
+  'term.broadcastScope': '僅廣播至目前 SSH 連線的終端機，不跨伺服器；輸入、貼上、快捷命令和 Ctrl+C 中斷均會一併傳送。',
+  'term.selectionHelp': '拖曳選取文字；vim/tmux 滑鼠模式請按住 Shift 拖曳。選取後 Ctrl+C / Ctrl+Shift+C 複製。',
+  'term.copy': '複製',
+  'term.copied': '已複製選取文字',
+  'term.copyFailed': '複製失敗，請允許剪貼簿寫入權限後重試。',
+  'term.pasteFailed': '貼上失敗，請允許剪貼簿讀取權限後重試。',
   'term.history': '歷史命令',
   'term.quick': '快速命令',
   'term.ctrlc': 'Ctrl+C',
@@ -213,6 +245,16 @@ const zhTW: Dict = {
 }
 
 const en: Dict = {
+  "conn.statusInvalid": "Invalid connection status response. Profiles were retained; refresh and try again.",
+  "conn.selectAll": "Select all",
+  "conn.selectProfile": "Select {name}",
+  "conn.selectedCount": "{count} selected",
+  "conn.deleteSelected": "Delete selected",
+  "conn.deleteSelectedConfirm": "Delete the {count} selected connection profiles?",
+  "conn.deleteProfilesOnly": "Active connections and authentication attempts will be closed or cancelled first. Only connection profiles are deleted, not remote files. Profiles that cannot be processed will be retained.",
+  "conn.deleteStillActive": "The connection or authentication has not ended. The profile was retained; please try again later.",
+  "conn.deletedCount": "Deleted {count} connection profiles",
+  "conn.deleteFailedCount": "{count} profiles could not be processed and were retained",
   'app.title': 'GoNavi SSH',
   'tab.terminals': 'Terminals',
   'tab.files': 'Files',
@@ -259,6 +301,12 @@ const en: Dict = {
   'term.ended': 'Session ended',
   'term.exitCode': 'Process exited with code {code}',
   'term.broadcast': 'Broadcast input',
+  'term.broadcastScope': 'Broadcast only to terminals on this SSH connection, never across servers. Typing, paste, quick commands and Ctrl+C interrupts are sent together.',
+  'term.selectionHelp': 'Drag to select text; hold Shift in vim/tmux mouse mode. Copy a selection with Ctrl+C / Ctrl+Shift+C.',
+  'term.copy': 'Copy',
+  'term.copied': 'Selected text copied',
+  'term.copyFailed': 'Copy failed. Allow clipboard write access and try again.',
+  'term.pasteFailed': 'Paste failed. Allow clipboard read access and try again.',
   'term.history': 'History',
   'term.quick': 'Quick commands',
   'term.ctrlc': 'Ctrl+C',
@@ -317,6 +365,16 @@ const en: Dict = {
 }
 
 const ja: Dict = {
+  "conn.statusInvalid": "接続状態の応答が無効です。プロファイルは保持されました。更新して再試行してください。",
+  "conn.selectAll": "すべて選択",
+  "conn.selectProfile": "{name} を選択",
+  "conn.selectedCount": "{count} 件選択",
+  "conn.deleteSelected": "選択項目を削除",
+  "conn.deleteSelectedConfirm": "選択した {count} 件の接続プロファイルを削除しますか？",
+  "conn.deleteProfilesOnly": "接続中または認証中の場合は先に切断・キャンセルします。接続プロファイルのみを削除し、リモートファイルは削除しません。処理に失敗したプロファイルは保持します。",
+  "conn.deleteStillActive": "接続または認証が終了していません。プロファイルは保持されました。後で再試行してください。",
+  "conn.deletedCount": "接続プロファイルを {count} 件削除しました",
+  "conn.deleteFailedCount": "{count} 件の処理に失敗し、プロファイルを保持しました",
   'app.title': 'GoNavi SSH',
   'tab.terminals': 'ターミナル',
   'tab.files': 'ファイル',
@@ -363,6 +421,12 @@ const ja: Dict = {
   'term.ended': 'セッション終了',
   'term.exitCode': '終了コード {code} で終了しました',
   'term.broadcast': 'ブロードキャスト入力',
+  'term.broadcastScope': '現在の SSH 接続のターミナルにのみ送信し、別サーバーには送信しません。入力、貼り付け、クイックコマンド、Ctrl+C の割り込みも同時に送信されます。',
+  'term.selectionHelp': 'ドラッグで文字を選択。vim/tmux のマウスモードでは Shift を押しながらドラッグ。選択後 Ctrl+C / Ctrl+Shift+C でコピー。',
+  'term.copy': 'コピー',
+  'term.copied': '選択した文字をコピーしました',
+  'term.copyFailed': 'コピーに失敗しました。クリップボードへの書き込みを許可して再試行してください。',
+  'term.pasteFailed': '貼り付けに失敗しました。クリップボードの読み取りを許可して再試行してください。',
   'term.history': '履歴',
   'term.quick': 'クイックコマンド',
   'term.ctrlc': 'Ctrl+C',
@@ -421,6 +485,16 @@ const ja: Dict = {
 }
 
 const de: Dict = {
+  "conn.statusInvalid": "Ungültige Antwort zum Verbindungsstatus. Die Profile bleiben erhalten; aktualisieren Sie die Ansicht und versuchen Sie es erneut.",
+  "conn.selectAll": "Alle auswählen",
+  "conn.selectProfile": "{name} auswählen",
+  "conn.selectedCount": "{count} ausgewählt",
+  "conn.deleteSelected": "Auswahl löschen",
+  "conn.deleteSelectedConfirm": "Die {count} ausgewählten Verbindungsprofile löschen?",
+  "conn.deleteProfilesOnly": "Aktive Verbindungen und Authentifizierungen werden zuerst beendet oder abgebrochen. Nur Verbindungsprofile werden gelöscht, keine entfernten Dateien. Nicht verarbeitete Profile bleiben erhalten.",
+  "conn.deleteStillActive": "Die Verbindung oder Authentifizierung ist noch aktiv. Das Profil bleibt erhalten; versuchen Sie es später erneut.",
+  "conn.deletedCount": "{count} Verbindungsprofile gelöscht",
+  "conn.deleteFailedCount": "{count} Profile konnten nicht verarbeitet werden und bleiben erhalten",
   'app.title': 'GoNavi SSH',
   'tab.terminals': 'Terminals',
   'tab.files': 'Dateien',
@@ -467,6 +541,12 @@ const de: Dict = {
   'term.ended': 'Sitzung beendet',
   'term.exitCode': 'Prozess mit Code {code} beendet',
   'term.broadcast': 'Eingabe broadcasten',
+  'term.broadcastScope': 'Nur an Terminals dieser SSH-Verbindung senden, nie an andere Server. Eingaben, Einfügen, Schnellbefehle und Strg+C-Unterbrechungen werden gemeinsam gesendet.',
+  'term.selectionHelp': 'Text durch Ziehen markieren; im vim/tmux-Mausmodus Umschalt gedrückt halten. Auswahl mit Strg+C / Strg+Umschalt+C kopieren.',
+  'term.copy': 'Kopieren',
+  'term.copied': 'Markierter Text kopiert',
+  'term.copyFailed': 'Kopieren fehlgeschlagen. Schreibzugriff auf die Zwischenablage erlauben und erneut versuchen.',
+  'term.pasteFailed': 'Einfügen fehlgeschlagen. Lesezugriff auf die Zwischenablage erlauben und erneut versuchen.',
   'term.history': 'Verlauf',
   'term.quick': 'Schnellbefehle',
   'term.ctrlc': 'Strg+C',
@@ -525,6 +605,16 @@ const de: Dict = {
 }
 
 const ru: Dict = {
+  "conn.statusInvalid": "Некорректный ответ о состоянии подключений. Профили сохранены; обновите список и повторите попытку.",
+  "conn.selectAll": "Выбрать все",
+  "conn.selectProfile": "Выбрать {name}",
+  "conn.selectedCount": "Выбрано: {count}",
+  "conn.deleteSelected": "Удалить выбранные",
+  "conn.deleteSelectedConfirm": "Удалить выбранные профили подключения ({count})?",
+  "conn.deleteProfilesOnly": "Активные подключения и попытки аутентификации сначала будут закрыты или отменены. Удаляются только профили подключения, а не удалённые файлы. При ошибке обработки профиль сохраняется.",
+  "conn.deleteStillActive": "Подключение или аутентификация ещё активны. Профиль сохранён; повторите попытку позже.",
+  "conn.deletedCount": "Удалено профилей подключения: {count}",
+  "conn.deleteFailedCount": "Не удалось обработать профили ({count}); они сохранены",
   'app.title': 'GoNavi SSH',
   'tab.terminals': 'Терминалы',
   'tab.files': 'Файлы',
@@ -571,6 +661,12 @@ const ru: Dict = {
   'term.ended': 'Сеанс завершён',
   'term.exitCode': 'Процесс завершён с кодом {code}',
   'term.broadcast': 'Широковещательный ввод',
+  'term.broadcastScope': 'Трансляция только в терминалы этого SSH-соединения, не на другие серверы. Ввод, вставка, быстрые команды и прерывание Ctrl+C отправляются вместе.',
+  'term.selectionHelp': 'Выделяйте текст мышью; в режиме мыши vim/tmux удерживайте Shift. Копируйте выделение через Ctrl+C / Ctrl+Shift+C.',
+  'term.copy': 'Копировать',
+  'term.copied': 'Выделенный текст скопирован',
+  'term.copyFailed': 'Не удалось скопировать. Разрешите запись в буфер обмена и повторите попытку.',
+  'term.pasteFailed': 'Не удалось вставить. Разрешите чтение буфера обмена и повторите попытку.',
   'term.history': 'История',
   'term.quick': 'Быстрые команды',
   'term.ctrlc': 'Ctrl+C',
@@ -647,11 +743,8 @@ function resolveDict(locale: string): { primary: Dict; fallback: Dict } {
   return { primary: en, fallback: zhCN }
 }
 
-const resolved = resolveDict(hostPrefs.locale)
-const primary = resolved.primary
-const fallback = resolved.fallback
-
 export function t(key: string, params?: Record<string, string | number>): string {
+  const { primary, fallback } = resolveDict(hostPrefs.locale)
   let s = primary[key] ?? fallback[key] ?? zhCN[key] ?? key
   if (params) {
     for (const [k, v] of Object.entries(params)) {

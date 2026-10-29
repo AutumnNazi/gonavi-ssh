@@ -360,10 +360,15 @@ test('poll EOF and exhausted read retries stop writes before reporting terminal 
   }
 })
 
-function terminalView(write) {
+function terminalView(write, clipboard = { writeText: async () => {} }, initialPrefs) {
   const time = clock()
-  const hooks = [], effects = [], pending = [], terminals = [], warnings = [], reads = []
-  let cursor = 0, now = 0
+  const hooks = [], effects = [], pending = [], terminals = [], warnings = [], notices = [], reads = [], observers = []
+  let cursor = 0, now = 0, hostVisible = true, rendered
+  const body = {}
+  const window = new EventTarget()
+  window.gonaviHostPrefs = initialPrefs
+  const document = { body, activeElement: body, createElement: () => ({ style: {} }) }
+  const host = { getClientRects: () => hostVisible ? [{}] : [], contains: element => !!element?.insideTerminal }
   const react = {
     useRef(value) { const index = cursor++; return hooks[index] ??= { current: value } },
     useState(value) {
@@ -381,17 +386,24 @@ function terminalView(write) {
     },
   }
   class Terminal {
-    constructor() { terminals.push(this) }
+    constructor(options) { this.options = options; this.selection = ''; this.bufferText = ''; this.focusCount = 0; terminals.push(this) }
     loadAddon() {}
     open() {}
-    focus() {}
-    write() {}
+    focus() { this.focusCount++; document.activeElement = this.element ??= { insideTerminal: true } }
+    write(text) { this.bufferText += text }
     onData(input) { this.input = input; return { dispose() {} } }
     onResize() { return { dispose() {} } }
+    getSelection() { return this.selection }
+    onSelectionChange(listener) { this.selectionChange = listener; return { dispose: () => { this.selectionDisposed = true } } }
+    attachCustomKeyEventHandler(handler) { this.keyHandler = handler }
     dispose() { this.disposed = true }
   }
   class FitAddon { fit() {} }
-  class ResizeObserver { observe() {}; disconnect() {} }
+  class ResizeObserver { constructor(callback) { this.callback = callback; observers.push(this) }; observe() {}; disconnect() { this.disconnected = true } }
+  function jsx(type, props) {
+    if (props.ref) props.ref.current = host
+    return { type, props }
+  }
   const b64 = loadTs(path.join(__dirname, 'b64.ts'), { TextEncoder, TextDecoder, atob, btoa })
   const createTerminalWriteQueue = loadTs(path.join(__dirname, 'terminalWriteQueue.ts'), time).createTerminalWriteQueue
   const invokeAs = async (command, args, options) => {
@@ -403,29 +415,36 @@ function terminalView(write) {
     if (command === 'settings.get') return { settings: { quickCommands: [], cwdFollow: false } }
     return write(command, args, options)
   }
+  const hostPrefs = loadTs(path.join(__dirname, 'hostPrefs.ts'), { window, navigator: { language: 'en-US' }, document })
+  const terminalTheme = existsSync(path.join(__dirname, 'terminalTheme.ts')) ? loadTs(path.join(__dirname, 'terminalTheme.ts'), { document }) : {}
   const exports = loadTs(path.join(__dirname, 'components/TerminalView.tsx'), {
-    ...time, Date: { now: () => now }, Terminal, FitAddon, ResizeObserver,
+    ...time, Date: { now: () => now }, Terminal, FitAddon, ResizeObserver, navigator: { clipboard }, document,
     require(name) {
       if (name === 'react') return react
-      if (name === 'react/jsx-runtime') return { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }) }
-      if (name === 'antd') return { message: { warning: text => warnings.push({ text, at: now }) } }
+      if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx }
+      if (name === 'antd') return { message: { warning: text => warnings.push({ text, at: now }), error: text => { warnings.push({ text, at: now }); notices.push({ type: 'error', text }) }, success: text => notices.push({ type: 'success', text }) } }
       if (name === '@xterm/xterm') return { Terminal }
       if (name === '@xterm/addon-fit') return { FitAddon }
       if (name === '../terminalWriteQueue') return { createTerminalWriteQueue }
       if (name === '../bridge') return { invokeAs, describeError: String }
       if (name === '../b64') return b64
       if (name === '../i18n') return { t: key => key }
+      if (name === '../hostPrefs') return hostPrefs
+      if (name === '../terminalTheme') return terminalTheme
       return {}
     },
   })
   function render(sessionKey = 'session') {
     cursor = 0
-    exports.TerminalView({ tab: { sessionKey, connectionId: 'connection', tabKey: 'tab' }, allTabs: [], onCwd() {} })
+    rendered = exports.TerminalView({ tab: { sessionKey, connectionId: 'connection', tabKey: 'tab' }, allTabs: [], onCwd() {} })
     for (const run of pending.splice(0)) run()
     return terminals.at(-1).input
   }
   return {
-    warnings, time, terminals, render,
+    warnings, notices, time, terminals, render, observers, document, hostPrefs,
+    get tree() { return rendered },
+    preferences(value) { window.gonaviHostPrefs = value; window.dispatchEvent(new Event('gonavi:host-preferences')) },
+    setVisible(value) { hostVisible = value; observers.at(-1).callback() },
     setNow(value) { now = value },
     closeSession() { reads.at(-1).resolve({ dataBase64: '', eof: true, hasExit: false }) },
     async unmount() {
@@ -435,6 +454,232 @@ function terminalView(write) {
     },
   }
 }
+
+test('selected Ctrl+C copies instead of sending SIGINT, while unselected Ctrl+C remains terminal input', async () => {
+  const sent = [], copied = []
+  const view = terminalView(async (_command, args) => sent.push(args.dataBase64), { writeText: async text => copied.push(text) })
+  const input = view.render()
+  const term = view.terminals[0]
+  const key = { type: 'keydown', key: 'c', ctrlKey: true, shiftKey: false, altKey: false, metaKey: false, preventDefault() {} }
+  try {
+    term.selection = 'selected 中文'
+    const allowed = term.keyHandler?.(key) ?? true
+    if (allowed) input('')
+    await tick()
+    assert.deepEqual(sent, [], 'selected copy must not enter the terminal write queue')
+    assert.deepEqual(copied, ['selected 中文'])
+    term.selection = ''
+    assert.equal(term.keyHandler(key), true, 'unselected Ctrl+C must remain SIGINT')
+    input('')
+    await tick()
+    assert.deepEqual(sent, ['Aw=='])
+  } finally { await view.unmount() }
+})
+
+test('Ctrl+Shift+C never sends a control byte and denied copy shows feedback without losing the selection', async () => {
+  const sent = []
+  const view = terminalView(async (_command, args) => sent.push(args), { writeText: async () => { throw new Error('denied') } })
+  view.render()
+  const term = view.terminals[0]
+  const key = { type: 'keydown', key: 'C', ctrlKey: true, shiftKey: true, altKey: false, metaKey: false, preventDefault() {} }
+  try {
+    assert.equal(term.keyHandler(key), false, 'an empty selection still consumes copy shortcut')
+    term.selection = 'retained selection'
+    assert.equal(term.keyHandler(key), false)
+    assert.equal(term.keyHandler({ ...key, type: 'keyup' }), false)
+    await tick()
+    assert.equal(term.selection, 'retained selection')
+    assert.deepEqual(sent, [])
+    assert.deepEqual(view.warnings.map(x => x.text), ['term.copyFailed'])
+    assert.equal(term.focusCount, 2)
+  } finally { await view.unmount() }
+  assert.equal(term.selectionDisposed, true)
+  assert.equal(view.observers[0].disconnected, true)
+})
+
+
+
+function copySelected(view) {
+  const term = view.terminals.at(-1)
+  term.selection = 'clipboard selected text'
+  term.keyHandler({ type: 'keydown', key: 'c', ctrlKey: true, shiftKey: false, altKey: false, metaKey: false, preventDefault() {} })
+}
+
+function pasteButton(tree) {
+  if (!tree || typeof tree !== 'object') return undefined
+  if (Array.isArray(tree)) return tree.map(pasteButton).find(Boolean)
+  if (tree.type === 'button' && tree.props?.['aria-label'] === 'form.paste') return tree
+  return pasteButton(tree.props?.children)
+}
+
+for (const outcome of ['resolve', 'reject']) {
+  for (const lifecycle of ['unmount', 'replace', 'hide']) {
+    test('delayed copy ' + outcome + ' ignores a ' + lifecycle + ' source terminal', async () => {
+      const completion = deferred()
+      const view = terminalView(async () => {}, { writeText: () => completion.promise })
+      view.render('source')
+      const source = view.terminals[0]
+      copySelected(view)
+      if (lifecycle === 'unmount') await view.unmount()
+      else if (lifecycle === 'replace') view.render('replacement')
+      else view.setVisible(false)
+      const focusBefore = view.terminals.map(term => term.focusCount)
+      if (outcome === 'resolve') completion.resolve()
+      else completion.reject(new Error('late clipboard failure'))
+      await tick()
+      assert.deepEqual(view.terminals.map(term => term.focusCount), focusBefore, 'late copy cannot refocus any terminal')
+      assert.deepEqual(view.notices, [], 'late copy cannot notify for an inactive view')
+      assert.equal(source.disposed, lifecycle === 'hide' ? undefined : true)
+      if (lifecycle !== 'unmount') await view.unmount()
+    })
+  }
+  test('delayed copy ' + outcome + ' respects focus moved to another input', async () => {
+    const completion = deferred()
+    const view = terminalView(async () => {}, { writeText: () => completion.promise })
+    view.render()
+    const term = view.terminals[0]
+    copySelected(view)
+    const outsideInput = { tagName: 'INPUT' }
+    view.document.activeElement = outsideInput
+    const focusBefore = term.focusCount
+    if (outcome === 'resolve') completion.resolve()
+    else completion.reject(new Error('clipboard failed'))
+    await tick()
+    assert.equal(view.document.activeElement, outsideInput)
+    assert.equal(term.focusCount, focusBefore, 'copy must not steal another input focus')
+    assert.deepEqual(view.notices, [{ type: outcome === 'resolve' ? 'success' : 'error', text: outcome === 'resolve' ? 'term.copied' : 'term.copyFailed' }])
+    await view.unmount()
+  })
+}
+
+for (const lifecycle of ['unmount', 'replace', 'hide']) {
+  test('delayed paste never sends clipboard text after ' + lifecycle, async () => {
+    const completion = deferred(), sent = []
+    const view = terminalView(async (command, args) => sent.push({ command, args }), { readText: () => completion.promise })
+    view.render('source')
+    const button = pasteButton(view.tree)
+    assert.ok(button)
+    const pending = button.props.onClick({ currentTarget: view.document.activeElement })
+    if (lifecycle === 'unmount') await view.unmount()
+    else if (lifecycle === 'replace') view.render('replacement')
+    else view.setVisible(false)
+    const focusBefore = view.terminals.map(term => term.focusCount)
+    completion.resolve('must not reach a replacement shell\r')
+    await pending; await tick()
+    assert.deepEqual(sent, [], 'old paste may not write to a new or inactive session')
+    assert.deepEqual(view.terminals.map(term => term.focusCount), focusBefore)
+    assert.deepEqual(view.notices, [])
+    if (lifecycle !== 'unmount') await view.unmount()
+  })
+}
+
+test('delayed paste respects another input while targeting only its original session', async () => {
+  const completion = deferred(), sent = []
+  const view = terminalView(async (command, args) => sent.push({ command, args }), { readText: () => completion.promise })
+  view.render('source')
+  const term = view.terminals[0], pending = pasteButton(view.tree).props.onClick({ currentTarget: view.document.activeElement })
+  const outsideInput = { tagName: 'INPUT' }
+  view.document.activeElement = outsideInput
+  const focusBefore = term.focusCount
+  completion.resolve('paste text')
+  await pending; await tick()
+  assert.equal(view.document.activeElement, outsideInput)
+  assert.equal(term.focusCount, focusBefore)
+  assert.equal(sent.length, 1)
+  assert.equal(sent[0].args.sessionKey, 'source')
+  assert.equal(new TextDecoder().decode(Buffer.from(sent[0].args.dataBase64, 'base64')), 'paste text')
+  await view.unmount()
+})
+
+
+
+for (const outcome of ['resolve', 'reject']) {
+  test('clipboard action buttons restore focus only while their own action retains it: ' + outcome, async () => {
+    const copy = deferred(), paste = deferred(), sent = []
+    const view = terminalView(async (_command, args) => sent.push(args), { writeText: () => copy.promise, readText: () => paste.promise })
+    view.render('original')
+    const term = view.terminals[0]
+    const nodes = []
+    const visit = node => { if (!node || typeof node !== 'object') return; if (Array.isArray(node)) return node.forEach(visit); nodes.push(node); visit(node.props?.children) }
+    visit(view.tree)
+    term.selection = 'selected'
+    const action = { tagName: 'BUTTON' }
+    view.document.activeElement = action
+    nodes.find(node => node.type === 'button' && node.props['aria-label'] === 'term.copy').props.onClick({ currentTarget: action })
+    if (outcome === 'resolve') copy.resolve()
+    else copy.reject(new Error('denied'))
+    await tick()
+    assert.equal(term.focusCount, 2)
+    assert.equal(view.document.activeElement, term.element)
+    view.document.activeElement = action
+    const pending = pasteButton(view.tree).props.onClick({ currentTarget: action })
+    if (outcome === 'resolve') paste.resolve('normal paste')
+    else paste.reject(new Error('denied'))
+    await pending; await tick()
+    assert.equal(term.focusCount, 3)
+    assert.equal(view.document.activeElement, term.element)
+    assert.equal(sent.length, outcome === 'resolve' ? 1 : 0)
+    assert.deepEqual(view.notices.map(n => n.text), outcome === 'resolve' ? ['term.copied'] : ['term.copyFailed', 'term.pasteFailed'])
+    await view.unmount()
+  })
+}
+
+for (const lifecycle of ['unmount', 'replace', 'hide']) {
+  test('delayed paste rejection is silent after ' + lifecycle, async () => {
+      const completion = deferred()
+      const view = terminalView(async () => {}, { readText: () => completion.promise })
+      view.render('source')
+      const pending = pasteButton(view.tree).props.onClick({ currentTarget: view.document.activeElement })
+      if (lifecycle === 'unmount') await view.unmount()
+      else if (lifecycle === 'replace') view.render('replacement')
+      else view.setVisible(false)
+      const before = view.terminals.map(term => term.focusCount)
+      completion.reject(new Error('late read denial'))
+      await pending; await tick()
+      assert.deepEqual(view.notices, [])
+      assert.deepEqual(view.terminals.map(term => term.focusCount), before)
+      if (lifecycle !== 'unmount') await view.unmount()
+  })
+}
+
+test('only hidden-to-visible terminal transitions restore focus, keeping the same selection and instance', async () => {
+  const view = terminalView(async () => {})
+  view.render()
+  const term = view.terminals[0]
+  try {
+    term.selection = 'keep selection'
+    view.setVisible(true)
+    assert.equal(term.focusCount, 1, 'ordinary resizing must not steal focus from toolbar controls')
+    view.setVisible(false)
+    assert.equal(term.focusCount, 1)
+    view.setVisible(true)
+    assert.equal(term.focusCount, 2, 'visible terminal must be ready for keyboard input')
+    assert.equal(term.selection, 'keep selection')
+    assert.equal(view.terminals.length, 1)
+    view.setVisible(false)
+    view.document.activeElement = { tagName: 'INPUT' }
+    view.setVisible(true)
+    assert.equal(term.focusCount, 2, 'an unrelated input must keep focus when a terminal becomes visible')
+  } finally { await view.unmount() }
+})
+
+test('new terminal copy and scope messages exist in all six locale catalogs', () => {
+  const source = readFileSync(path.join(__dirname, 'i18n.ts'), 'utf8')
+  const ast = ts.createSourceFile('i18n.ts', source, ts.ScriptTarget.Latest, true)
+  const dictionaries = ast.statements.filter(ts.isVariableStatement).flatMap(s => [...s.declarationList.declarations])
+    .filter(d => ['zhCN', 'zhTW', 'en', 'ja', 'de', 'ru'].includes(d.name.getText(ast)))
+  assert.equal(dictionaries.length, 6)
+  const newKeys = ['term.copy', 'term.broadcastScope', 'term.selectionHelp', 'term.copied', 'term.copyFailed', 'term.pasteFailed']
+  for (const dict of dictionaries) {
+    const properties = dict.initializer.properties
+    const keys = properties.map(p => p.name.text)
+    assert.equal(new Set(keys).size, keys.length, 'catalog must not contain duplicate keys')
+    for (const key of newKeys) {
+      const property = properties.find(p => p.name.text === key)
+      assert.ok(property?.initializer.text?.trim(), dict.name.getText(ast) + ' lacks ' + key)
+    }
+  }
+})
 
 test('UI warnings throttle 87 capacity refusals from 600 inputs while preserving 513 accepted items', async () => {
   const first = deferred()
@@ -548,4 +793,72 @@ test('stream UTF-8 survives every chunk boundary for Chinese and emoji output', 
     const chunks = [bytes.subarray(0, boundary), bytes.subarray(boundary)]
     assert.equal(chunks.map(chunk => decode(b64.bytesToBase64(chunk))).join(''), text)
   }
+})
+
+
+test('host preset palette is consumed at first mount and hot changes preserve the production input queue and terminal', async () => {
+  const first = deferred(), sent = []
+  const view = terminalView(async (_command, args) => {
+    sent.push(new TextDecoder().decode(Buffer.from(args.dataBase64, 'base64')))
+    if (sent.length === 1) await first.promise
+  }, undefined, { locale: 'en-US', theme: 'light', palette: { code: '#fff8ed', text: '#30251a', accent: '#a16024' } })
+  const input = view.render()
+  const term = view.terminals[0]
+  try {
+    assert.equal(term.options.theme.background, '#fff8ed', 'first-open preset must replace the fixed white background')
+    term.write('retained buffer 中文')
+    term.selection = 'retained selection'
+    input('first'); input('queued')
+    view.preferences({ locale: 'ja-JP', theme: 'light', palette: { code: '#eef8f4', text: '#213d30', accent: '#267657' } })
+    view.render()
+    assert.equal(term.options.theme.background, '#eef8f4', 'same-mode preset changes must update the live instance')
+    assert.equal(view.hostPrefs.hostPrefs.locale, 'ja-JP')
+    assert.equal(view.terminals.length, 1)
+    assert.equal(term.disposed, undefined)
+    assert.equal(term.bufferText, 'retained buffer 中文')
+    assert.equal(term.selection, 'retained selection')
+    assert.equal(term.focusCount, 1)
+    first.resolve(); await tick()
+    assert.deepEqual(sent, ['first', 'queued'])
+  } finally { first.resolve(); await view.unmount() }
+})
+
+
+test('terminal preference listener unmounts without late theme mutation and font changes keep selection', async () => {
+  const view = terminalView(async () => {})
+  view.render()
+  const term = view.terminals[0]
+  term.selection = 'retain font selection'
+  term.write('unchanged buffer')
+  view.preferences({ locale: 'en-US', theme: 'dark', appearance: { monoFontSize: 18, monoFontFamily: 'Consolas, monospace' } })
+  assert.equal(term.options.fontSize, 18)
+  assert.equal(term.options.fontFamily, 'Consolas, monospace')
+  assert.equal(term.selection, 'retain font selection')
+  assert.equal(term.bufferText, 'unchanged buffer')
+  assert.equal(view.terminals.length, 1)
+  const theme = term.options.theme
+  await view.unmount()
+  view.preferences({ locale: 'en-US', theme: 'light', palette: { code: '#fff8ed' } })
+  assert.equal(term.options.theme, theme)
+  assert.equal(term.disposed, true)
+})
+
+
+test('terminal instructions occupy only copy and broadcast tooltips, with readable alpha selection', async () => {
+  const view = terminalView(async () => {}, undefined, { locale: 'en-US', theme: 'dark', palette: { code: '#1b1d21', accentSoft: 'rgba(121, 166, 147, 0.16)' } })
+  view.render()
+  try {
+    const nodes = []
+    function visit(node) {
+      if (!node || typeof node !== 'object') return
+      if (Array.isArray(node)) { node.forEach(visit); return }
+      nodes.push(node)
+      visit(node.props?.children)
+    }
+    visit(view.tree)
+    assert.equal(nodes.filter(node => node.props?.className === 'terminal-hints').length, 0)
+    assert.equal(nodes.filter(node => node.props?.title === 'term.selectionHelp').length, 1)
+    assert.equal(nodes.filter(node => node.props?.title === 'term.broadcastScope').length, 1)
+    assert.equal(view.terminals[0].options.theme.selectionForeground, '#ffffff')
+  } finally { await view.unmount() }
 })

@@ -109,6 +109,92 @@ func TestStoreDelete(t *testing.T) {
 	}
 }
 
+func TestProfilesHaveStableCreationOrder(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	profiles := []Profile{
+		{ID: "late-z", CreatedAt: base.Add(time.Hour)},
+		{ID: "same-b", CreatedAt: base},
+		{ID: "legacy-b"},
+		{ID: "same-a", CreatedAt: base},
+		{ID: "late-a", CreatedAt: base.Add(time.Hour)},
+		{ID: "legacy-a"},
+	}
+	for _, p := range profiles {
+		p.Name, p.Host, p.User, p.AuthMethod = p.ID, "fixture", "ops", AuthNone
+		if _, err := s.Upsert(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []string{"legacy-a", "legacy-b", "same-a", "same-b", "late-a", "late-z"}
+	check := func(store *Store) {
+		t.Helper()
+		for attempt := 0; attempt < 32; attempt++ {
+			got := store.List()
+			if len(got) != len(want) {
+				t.Fatalf("profile count=%d want=%d", len(got), len(want))
+			}
+			for i, id := range want {
+				if got[i].ID != id {
+					t.Fatalf("unstable creation order on read %d: position %d got %s want %s", attempt, i, got[i].ID, id)
+				}
+			}
+		}
+		data, err := os.ReadFile(filepath.Join(store.dir, profilesFile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var persisted storedFile
+		if err := json.Unmarshal(data, &persisted); err != nil {
+			t.Fatal(err)
+		}
+		if len(persisted.Profiles) != len(want) {
+			t.Fatal("stored profile count differs from list")
+		}
+		for i, id := range want {
+			if persisted.Profiles[i].ID != id {
+				t.Fatalf("stored order at position %d got %s want %s", i, persisted.Profiles[i].ID, id)
+			}
+		}
+	}
+	check(s)
+	edited, ok := s.Get("same-b")
+	if !ok {
+		t.Fatal("profile missing")
+	}
+	edited.Name = "renamed-first-alphabetically"
+	edited.CreatedAt = base.Add(-time.Hour)
+	if _, err := s.Upsert(edited); err != nil {
+		t.Fatal(err)
+	}
+	check(s)
+	again, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(again)
+	if err := again.Delete("same-a"); err != nil {
+		t.Fatal(err)
+	}
+	want = []string{"legacy-a", "legacy-b", "same-b", "late-a", "late-z"}
+	check(again)
+	created, err := again.Upsert(Profile{Name: "new-last", Host: "fixture", User: "ops", AuthMethod: AuthNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = append(want, created.ID)
+	check(again)
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(reopened)
+}
+
 func TestProfileValidate(t *testing.T) {
 	cases := []struct {
 		name    string

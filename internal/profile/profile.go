@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -354,14 +355,24 @@ func Open(dir string) (*Store, error) {
 	return s, nil
 }
 
-// List 返回全部档案（含敏感明文，仅在插件进程内部使用）。
+// List 按创建时间返回档案，相同时间按 ID 排序；编辑或连接状态不改变位置。
 func (s *Store) List() []Profile {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.listLocked()
+}
+
+func (s *Store) listLocked() []Profile {
 	out := make([]Profile, 0, len(s.profiles))
 	for _, p := range s.profiles {
 		out = append(out, p)
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
 	return out
 }
 
@@ -444,7 +455,7 @@ func (s *Store) Delete(id string) error {
 // flushLocked 把当前档案表整体写回 profiles.json；调用方必须持有锁。
 func (s *Store) flushLocked() error {
 	file := storedFile{Profiles: make([]storedProfile, 0, len(s.profiles))}
-	for _, p := range s.profiles {
+	for _, p := range s.listLocked() {
 		sp := storedProfile{
 			ID: p.ID, Name: p.Name, Host: p.Host, Port: p.Port, User: p.User,
 			AuthMethod: p.AuthMethod, KeyPath: p.KeyPath,

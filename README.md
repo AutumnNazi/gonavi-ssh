@@ -50,9 +50,14 @@ scripts/package.sh  组装插件包（三平台二进制 + 前端 + 清单 → z
 
 ```sh
 go test ./...                        # 后端测试
-cd frontend && npm install && npm run build   # 前端类型检查 + 构建
+(cd frontend && npm install && npm run build)  # 首次准备依赖 / 单独构建
+node --test scripts/package.test.mjs           # 打包行为回归（临时目录）
 bash scripts/package.sh                       # 组包 → dist/*.zip
 ```
+
+组包直接用现有 Node 执行本地 TypeScript 类型检查与 Vite 构建，失败即停止，不调用 npm 包装器，也不安装依赖。ZIP 仅包含 `bin/`、`frontend/` 和 `gonavi.plugin.json`，条目不带 `./`；重打时清除旧归档，避免残留资源。最终验收应对 `dist/gonavi-ssh-v0.0.1.zip` 运行宿主 `inspect`，不能只检查 `package/` 目录。
+
+设置 `GONAVI_HOST_ROOT` 为 GoNavi 源码目录后，上述测试会通过临时 Go overlay 调用真实 `InspectPackage`，验证旧 `./` 归档被拒绝、新归档与目录 digest 一致；不修改宿主源码，也不安装插件。可用 `GO_BIN`、`BASH_BIN` 指定已有工具的路径。
 
 插件运行在宿主内时，数据目录使用宿主分配的私有目录（`GONAVI_PLUGIN_DATA`）；
 独立运行时回落到 `~/.gonavi-ssh`，可用 `GONAVI_SSH_HOME` 覆盖；`GONAVI_SSH_READ_ONLY=1` 强制只读。

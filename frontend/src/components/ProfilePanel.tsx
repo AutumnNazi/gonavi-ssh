@@ -1,8 +1,9 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   Badge,
   Button,
+  Checkbox,
   Empty,
   Form,
   Input,
@@ -78,6 +79,26 @@ export function ProfilePanel({
   } | null>(null)
   const [form] = Form.useForm<ProfileFormValues>()
   const authMethod = Form.useWatch('authMethod', form)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
+  const [deleteTargets, setDeleteTargets] = useState<ProfileView[]>([])
+  const [deleting, setDeleting] = useState(false)
+  const deleteBusy = useRef(false)
+  const selected = profiles.filter(p => selectedIds.has(p.id))
+
+  useEffect(() => {
+    const available = new Set(profiles.map(p => p.id))
+    setSelectedIds(previous => new Set([...previous].filter(id => available.has(id))))
+  }, [profiles])
+
+  const toggleSelected = (id: string, checked: boolean) => {
+    if (deleteBusy.current) return
+    setSelectedIds(previous => {
+      const next = new Set(previous)
+      if (checked) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
 
   const connByProfile = useMemo(() => {
     const map = new Map<string, ConnectionInfo>()
@@ -141,15 +162,56 @@ export function ProfilePanel({
     }
   }
 
-  const deleteProfile = async (p: ProfileView) => {
+  const deleteProfiles = async (targets: ProfileView[]) => {
+    if (deleteBusy.current || targets.length === 0) return
+    deleteBusy.current = true
+    setDeleting(true)
+    const deleted = new Set<string>()
+    const failures: string[] = []
+    const active = (c: ConnectionInfo) => c.state === 'connecting' || c.state === 'needInput' || (c.state === 'ready' && c.alive !== false)
+    const readConnections = async (): Promise<ConnectionInfo[]> => {
+      const response = await invokeAs<{ connections: ConnectionInfo[] | null }>('conn.status', {})
+      // 兼容旧插件把 Go nil 切片编码为 null；缺字段和损坏响应不能当无连接。
+      if (response?.connections === null) return []
+      if (!Array.isArray(response?.connections) || response.connections.some(c =>
+        !c || typeof c.connectionId !== 'string' || !c.connectionId ||
+        typeof c.profileId !== 'string' || !c.profileId ||
+        !['connecting', 'needInput', 'ready', 'failed', 'cancelled'].includes(c.state) ||
+        (c.alive !== undefined && typeof c.alive !== 'boolean')
+      )) throw new Error(t('conn.statusInvalid'))
+      return response.connections
+    }
     try {
-      await invokeAs('profile.delete', { id: p.id })
+      for (const p of targets) {
+        try {
+          // 以当前后端状态为准，避免界面快照遗漏新连接或认证中的会话。
+          const current = await readConnections()
+          for (const c of current.filter(c => c.profileId === p.id && active(c))) {
+            await invokeAs(c.state === 'ready' ? 'conn.close' : 'conn.cancel', { connectionId: c.connectionId })
+          }
+          const remaining = await readConnections()
+          if (remaining.some(c => c.profileId === p.id && active(c))) {
+            throw new Error(t('conn.deleteStillActive'))
+          }
+          await invokeAs('profile.delete', { id: p.id })
+          deleted.add(p.id)
+        } catch (e) {
+          failures.push(`${p.name}: ${describeError(e)}`)
+        }
+      }
+      setSelectedIds(previous => new Set([...previous].filter(id => !deleted.has(id))))
+      if (deleted.size) message.success(t('conn.deletedCount', { count: deleted.size }))
+      if (failures.length) message.error(t('conn.deleteFailedCount', { count: failures.length }) + '\n' + failures.join('\n'))
       onChanged()
       onConnectionsChanged()
-    } catch (e) {
-      message.error(describeError(e))
+    } finally {
+      setDeleteTargets([])
+      setDeleting(false)
+      deleteBusy.current = false
     }
   }
+
+  const deleteProfile = (p: ProfileView) => deleteProfiles([p])
 
   const disconnect = async (c: ConnectionInfo) => {
     try {
@@ -247,6 +309,22 @@ export function ProfilePanel({
         </Space>
       </div>
 
+      {profiles.length > 0 && (
+        <div className="profile-selection-toolbar">
+          <Checkbox
+            aria-label={t('conn.selectAll')}
+            checked={selected.length === profiles.length}
+            indeterminate={selected.length > 0 && selected.length < profiles.length}
+            disabled={deleting}
+            onChange={event => { if (!deleteBusy.current) setSelectedIds(event.target.checked ? new Set(profiles.map(p => p.id)) : new Set()) }}
+          >{t('conn.selectAll')}</Checkbox>
+          <span className="profile-selection-count">{t('conn.selectedCount', { count: selected.length })}</span>
+          <Button size="small" danger disabled={deleting || selected.length === 0} aria-label={t('conn.deleteSelected')} onClick={() => setDeleteTargets(selected)}>
+            {t('conn.deleteSelected')}
+          </Button>
+        </div>
+      )}
+
       {profiles.length === 0 ? (
         <Empty description={t('conn.empty')} style={{ marginTop: 48 }} />
       ) : (
@@ -258,15 +336,18 @@ export function ProfilePanel({
             return (
               <div key={p.id} className="conn-card">
                 <div className="conn-card-head">
-                  <Space size={6} className="conn-card-name">
-                    <span className="conn-name">{p.name}</span>
-                    <Tag bordered={false} className="conn-auth-tag">{t(`auth.${p.authMethod}`)}</Tag>
-                    {(p.jumps?.length ?? 0) > 0 && (
-                      <Tag bordered={false} color="geekblue" className="conn-auth-tag">{`⇢ ${p.jumps!.length}`}</Tag>
-                    )}
-                  </Space>
+                  <Checkbox aria-label={t('conn.selectProfile', { name: p.name })} checked={selectedIds.has(p.id)} disabled={deleting} onChange={event => toggleSelected(p.id, event.target.checked)} />
+                  <div className="conn-card-name">
+                    <span className="conn-name" title={p.name}>{p.name}</span>
+                    <div className="conn-card-tags">
+                      <Tag bordered={false} className="conn-auth-tag">{t(`auth.${p.authMethod}`)}</Tag>
+                      {(p.jumps?.length ?? 0) > 0 && (
+                        <Tag bordered={false} color="geekblue" className="conn-auth-tag">{`⇢ ${p.jumps!.length}`}</Tag>
+                      )}
+                    </div>
+                  </div>
                   {ready ? (
-                    <Button size="small" danger ghost className="conn-action" onClick={() => disconnect(conn!)}>
+                    <Button size="small" danger ghost className="conn-action" disabled={deleting} onClick={() => disconnect(conn!)}>
                       {t('conn.disconnect')}
                     </Button>
                   ) : (
@@ -276,6 +357,7 @@ export function ProfilePanel({
                       ghost
                       className="conn-action"
                       loading={pending}
+                      disabled={deleting}
                       onClick={() => onConnect(p)}
                     >
                       {t('conn.connect')}
@@ -288,8 +370,8 @@ export function ProfilePanel({
                 <div className="conn-card-foot">
                   <span className="conn-card-state">{stateBadge(conn)}</span>
                   <span className="conn-card-links">
-                    <a onClick={() => openForm(p)}>{t('conn.edit')}</a>
-                    <Popconfirm title={`${t('conn.delete')} ${p.name}?`} onConfirm={() => deleteProfile(p)}>
+                    <a aria-disabled={deleting} onClick={() => { if (!deleteBusy.current) openForm(p) }}>{t('conn.edit')}</a>
+                    <Popconfirm disabled={deleting} title={`${t('conn.delete')} ${p.name}?`} onConfirm={() => deleteProfile(p)}>
                       <a className="profile-del">{t('conn.delete')}</a>
                     </Popconfirm>
                   </span>
@@ -299,6 +381,24 @@ export function ProfilePanel({
           })}
         </div>
       )}
+
+      <Modal
+        title={t('conn.deleteSelected')}
+        open={deleteTargets.length > 0}
+        onCancel={() => { if (!deleteBusy.current) setDeleteTargets([]) }}
+        onOk={() => deleteProfiles(deleteTargets)}
+        confirmLoading={deleting}
+        okText={t('conn.deleteSelected')}
+        cancelText={t('form.cancel')}
+        okButtonProps={{ danger: true }}
+        cancelButtonProps={{ disabled: deleting }}
+        closable={!deleting}
+        maskClosable={!deleting}
+      >
+        <p>{t('conn.deleteSelectedConfirm', { count: deleteTargets.length })}</p>
+        <p>{t('conn.deleteProfilesOnly')}</p>
+        <ul className="profile-delete-list">{deleteTargets.map(p => <li key={p.id}>{p.name}</li>)}</ul>
+      </Modal>
 
       <Modal
         title={editing === 'new' ? t('conn.new') : t('conn.edit')}

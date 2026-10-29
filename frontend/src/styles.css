@@ -1,10 +1,12 @@
-/* 主题变量：跟随宿主注入的 theme（body.theme-dark），未注入时浅色。 */
+/* 默认明暗变量；安全宿主 palette 通过 inline 变量实时覆盖，缺失时清除。 */
 
 :root {
   --bg: #ffffff;
   --card-bg: #ffffff;
   --header-bg: #fafafa;
   --term-bg: #ffffff;
+  --text: #202124;
+  --input-bg: #ffffff;
   --toolbar-bg: #f7f8fa;
   --toolbar-fg: #4b5563;
   --border: #e5e7eb;
@@ -24,6 +26,8 @@ body.theme-dark {
   --card-bg: #1c1c1e;
   --header-bg: #232325;
   --term-bg: #1e1e1e;
+  --text: #e5e7eb;
+  --input-bg: #1c1c1e;
   --toolbar-bg: #232325;
   --toolbar-fg: #cfcfcf;
   --border: #303032;
@@ -41,7 +45,26 @@ body,
 #root {
   height: 100%;
   margin: 0;
-  font-size: 13px;
+  font-size: var(--font-size, 13px);
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+}
+
+.app-root {
+  background: color-mix(in srgb, var(--bg) calc(var(--window-opacity, 1) * 100%), transparent);
+}
+
+body[data-background-image="true"] .app-root {
+  background: color-mix(in srgb, var(--bg) var(--background-tint, 85%), transparent);
+}
+
+::selection {
+  background: var(--selected-bg);
+  color: var(--text);
 }
 
 ::-webkit-scrollbar {
@@ -153,6 +176,27 @@ body,
 }
 
 /* 连接卡片：左侧信息 + 右侧主操作，底部状态与次级链接。 */
+.profile-selection-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.profile-selection-count {
+  flex: 1;
+  font-size: 12px;
+  color: var(--meta-fg);
+}
+
+.profile-delete-list {
+  max-height: 240px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  padding-left: 20px;
+}
+
 .conn-cards {
   display: flex;
   flex-direction: column;
@@ -183,15 +227,27 @@ body,
 .conn-card-name {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.conn-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
 }
 
 .conn-name {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
   font-weight: 600;
   font-size: 14px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 150px;
 }
 
 .conn-auth-tag {
@@ -209,7 +265,7 @@ body,
   margin-top: 4px;
   font-size: 12px;
   color: var(--meta-fg);
-  font-family: Consolas, monospace;
+  font-family: var(--mono-font-family, Consolas, monospace);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -295,13 +351,29 @@ body,
   font-size: 12px;
 }
 
-.terminal-toolbar a {
+.terminal-action {
+  border: 0;
+  padding: 2px 4px;
+  border-radius: 3px;
+  background: transparent;
   color: var(--toolbar-fg);
+  font: inherit;
+  cursor: pointer;
   transition: color 0.15s ease;
 }
 
-.terminal-toolbar a:hover {
+.terminal-action:hover:not(:disabled) {
   color: var(--accent);
+}
+
+.terminal-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.terminal-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .quick-cmd {
@@ -311,7 +383,7 @@ body,
 
 .history-line {
   cursor: pointer;
-  font-family: Consolas, monospace;
+  font-family: var(--mono-font-family, Consolas, monospace);
   font-size: 12px;
   border-radius: var(--radius-sm);
 }
@@ -644,7 +716,7 @@ body,
 }
 
 .fingerprint-line {
-  font-family: Consolas, monospace;
+  font-family: var(--mono-font-family, Consolas, monospace);
   color: var(--meta-fg);
   word-break: break-all;
 }

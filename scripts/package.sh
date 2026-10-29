@@ -26,17 +26,18 @@ build_backend linux   amd64 gonavi-ssh-linux-amd64
 build_backend darwin  arm64 gonavi-ssh-darwin-arm64
 
 echo "==> frontend build"
-(cd "$ROOT/frontend" && npm run build)
+(cd "$ROOT/frontend" && node node_modules/typescript/bin/tsc --noEmit && node node_modules/vite/bin/vite.js build)
 cp -r "$ROOT/frontend/dist/." "$STAGE/frontend/"
 
 cp "$ROOT/gonavi.plugin.json" "$STAGE/"
 
 echo "==> zip"
+rm -f "$OUT"
 if [ -x /c/Windows/System32/tar.exe ]; then
   # Windows 自带 bsdtar：-a 按 .zip 扩展名自动选 zip 格式
-  (cd "$STAGE" && /c/Windows/System32/tar.exe -a -cf "$OUT" .)
+  (cd "$STAGE" && /c/Windows/System32/tar.exe -a -cf "$OUT" bin frontend gonavi.plugin.json)
 elif command -v zip >/dev/null; then
-  (cd "$STAGE" && zip -r -q "$OUT" .)
+  (cd "$STAGE" && zip -r -q "$OUT" bin frontend gonavi.plugin.json)
 else
   echo "错误：找不到可用的 zip 工具" >&2
   exit 1
@@ -44,5 +45,5 @@ fi
 
 echo "完成：$OUT"
 echo "安装（GoNavi CLI）："
-echo "  gonavi plugin --root <dev-root> inspect $STAGE"
-echo "  gonavi plugin --root <dev-root> install --digest <digest> --trust $STAGE"
+echo "  gonavi plugin --root <dev-root> inspect $OUT"
+echo "  gonavi plugin --root <dev-root> install --digest <digest> --trust $OUT"

@@ -625,7 +625,8 @@ func (m *Manager) CloseAll() {
 // Status 返回全部连接概要（pending + ready）；id 非空时只返回该连接。
 func (m *Manager) Status(id string) []Status {
 	m.mu.Lock()
-	var out []Status
+	// 无连接也返回非 nil 列表，确保 JSON 契约是 [] 而不是 null。
+	out := make([]Status, 0, len(m.conns)+len(m.pending))
 	if id != "" {
 		if c, ok := m.conns[id]; ok {
 			out = append(out, readyStatus(c))

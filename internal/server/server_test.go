@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"testing"
+	"time"
 
 	goplugin "github.com/Syngnat/GoNavi/sdk/go"
 
@@ -72,6 +73,46 @@ func TestProfileSaveAndList(t *testing.T) {
 	}
 }
 
+func TestProfileListKeepsCreationOrderAfterRefreshAndEdit(t *testing.T) {
+	app := newTestApp(t)
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	for _, p := range []profile.Profile{
+		{ID: "last", CreatedAt: base.Add(time.Hour)},
+		{ID: "same-b", CreatedAt: base},
+		{ID: "first", CreatedAt: base.Add(-time.Hour)},
+		{ID: "same-a", CreatedAt: base},
+	} {
+		p.Name, p.Host, p.User, p.AuthMethod = p.ID, "fixture", "ops", profile.AuthNone
+		if _, err := app.profiles.Upsert(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []string{"first", "same-a", "same-b", "last"}
+	check := func() {
+		t.Helper()
+		for attempt := 0; attempt < 24; attempt++ {
+			res, err := invoke(t, app.Handlers()["profile.list"], `{}`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := res["profiles"].([]profileSanitizedView)
+			if len(got) != len(want) {
+				t.Fatal("profile count changed")
+			}
+			for i, id := range want {
+				if got[i].ID != id {
+					t.Fatalf("profile.list order %d: got %s want %s", i, got[i].ID, id)
+				}
+			}
+		}
+	}
+	check()
+	if _, err := invoke(t, app.Handlers()["profile.save"], `{"profile":{"id":"same-b","name":"alphabetically-first","host":"fixture","user":"ops","authMethod":"none"}}`); err != nil {
+		t.Fatal(err)
+	}
+	check()
+}
+
 func TestProfileSaveValidation(t *testing.T) {
 	app := newTestApp(t)
 	_, err := invoke(t, app.Handlers()["profile.save"],
@@ -93,6 +134,27 @@ func TestDecodeRejectsEmptyAndGarbage(t *testing.T) {
 	}
 	if _, err := invoke(t, app.Handlers()["conn.open"], `{nope`); err == nil {
 		t.Fatal("garbage args must fail")
+	}
+}
+
+func TestEmptyConnectionStatusSerializesAsArray(t *testing.T) {
+	app := newTestApp(t)
+	for _, args := range []string{`{}`, `{"connectionId":"missing"}`} {
+		res, err := invoke(t, app.Handlers()["conn.status"], args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := json.Marshal(res)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wire map[string]json.RawMessage
+		if err := json.Unmarshal(encoded, &wire); err != nil {
+			t.Fatal(err)
+		}
+		if string(wire["connections"]) != "[]" {
+			t.Fatalf("empty connection list must be [], got %s", encoded)
+		}
 	}
 }
 

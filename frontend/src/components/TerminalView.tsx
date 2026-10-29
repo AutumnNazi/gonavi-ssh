@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Drawer, List, Space, Switch, Tag, Tooltip, message } from 'antd'
-import { HistoryOutlined, SnippetsOutlined, ThunderboltOutlined } from '@ant-design/icons'
+import { CopyOutlined, HistoryOutlined, SnippetsOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
@@ -8,7 +8,8 @@ import { invokeAs, describeError } from '../bridge'
 import { encodeText, createStreamDecoder } from '../b64'
 import { createTerminalWriteQueue } from '../terminalWriteQueue'
 import { t } from '../i18n'
-import { isDark } from '../hostPrefs'
+import { hostPrefs, subscribeHostPrefs } from '../hostPrefs'
+import { terminalOptions } from '../terminalTheme'
 import type { QuickCommand, TerminalTab } from '../types'
 
 interface WriteRequest {
@@ -40,12 +41,15 @@ const RETRY_BASE_MS = 500
 const RETRY_CAP_MS = 5000
 const INPUT_WARNING_INTERVAL_MS = 1500
 
+
 // 终端视图：sessionKey 由上层创建，这里只负责 xterm 渲染、长轮询、
 // 输入写入（可广播到同连接其他会话）、历史与快捷命令。
 // xterm 生命周期 effect 只依赖 sessionKey：广播目标与回调经 ref 传递，
 // 避免任何无关状态变化销毁重建终端实例。
 export function TerminalView({ tab, allTabs, onCwd }: Props) {
   const hostRef = useRef<HTMLDivElement>(null)
+  const termRef = useRef<Terminal | null>(null)
+  const [hasSelection, setHasSelection] = useState(false)
   const [status, setStatus] = useState<'running' | 'closed' | 'error'>('running')
   const [detail, setDetail] = useState('')
   const [broadcast, setBroadcast] = useState(false)
@@ -92,6 +96,48 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
     return queue.enqueue({ command: keys.length > 1 ? 'terminal.writeMulti' : 'terminal.write', args })
   }
 
+  const copySelection = async (action?: HTMLElement) => {
+    const term = termRef.current
+    const host = hostRef.current
+    const text = term?.getSelection()
+    if (!term || !host || !text || !host.getClientRects().length) return
+    const focusAtStart = document.activeElement
+    const isCurrent = () => termRef.current === term && hostRef.current === host && !!host.getClientRects().length
+    try {
+      await navigator.clipboard.writeText(text)
+      if (isCurrent()) message.success(t('term.copied'))
+    } catch {
+      if (isCurrent()) message.error(t('term.copyFailed'))
+    } finally {
+      // 复制等待期间关闭/切换终端或转去其他输入框时，不再恢复旧焦点。
+      if (isCurrent() && document.activeElement === focusAtStart &&
+        (host.contains(focusAtStart) || (action !== undefined && focusAtStart === action))) term.focus()
+    }
+  }
+
+  const pasteClipboard = async (action?: HTMLElement) => {
+    const term = termRef.current
+    const host = hostRef.current
+    const queue = writeQueueRef.current
+    if (!term || !host || !queue || !host.getClientRects().length) return
+    const focusAtStart = document.activeElement
+    const keys = [sessionKey, ...targets()]
+    const isCurrent = () => termRef.current === term && hostRef.current === host &&
+      writeQueueRef.current === queue && !!host.getClientRects().length
+    try {
+      const text = await navigator.clipboard.readText()
+      if (text && isCurrent()) queue.enqueue({
+        command: keys.length > 1 ? 'terminal.writeMulti' : 'terminal.write',
+        args: keys.length > 1 ? { sessionKeys: keys, dataBase64: encodeText(text) } : { sessionKey, dataBase64: encodeText(text) },
+      })
+    } catch {
+      if (isCurrent()) message.error(t('term.pasteFailed'))
+    } finally {
+      if (isCurrent() && document.activeElement === focusAtStart &&
+        (host.contains(focusAtStart) || (action !== undefined && focusAtStart === action))) term.focus()
+    }
+  }
+
   useEffect(() => {
     if (!sessionKey) return
     let stopped = false
@@ -103,24 +149,48 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
     const decodeChunk = createStreamDecoder()
 
     const term = new Terminal({
-      fontSize: 13,
+      ...terminalOptions(hostPrefs),
       cursorBlink: true,
-      fontFamily: 'Consolas, "Courier New", monospace',
-      theme: isDark
-        ? { background: '#1e1e1e' }
-        : { background: '#ffffff', foreground: '#333333', cursor: '#333333' },
       scrollback: 5000,
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(hostRef.current!)
     fit.fit()
+    termRef.current = term
+    const unsubscribePrefs = subscribeHostPrefs(prefs => {
+      const options = terminalOptions(prefs)
+      const metricsChanged = term.options.fontFamily !== options.fontFamily || term.options.fontSize !== options.fontSize
+      term.options.theme = options.theme
+      term.options.fontFamily = options.fontFamily
+      term.options.fontSize = options.fontSize
+      if (metricsChanged && hostRef.current?.getClientRects().length) fit.fit()
+    })
+    setHasSelection(false)
+    const selectionSub = term.onSelectionChange(() => setHasSelection(!!term.getSelection()))
+    term.attachCustomKeyEventHandler(event => {
+      const copyKey = event.ctrlKey && !event.altKey && !event.metaKey && event.key.toLowerCase() === 'c'
+      if (!copyKey || (!event.shiftKey && !term.getSelection())) return true
+      if (event.type === 'keydown') {
+        event.preventDefault()
+        void copySelection()
+      }
+      return false
+    })
 
     const dataSub = term.onData(d => enqueueWrite(d))
     const resizeSub = term.onResize(({ cols, rows }) => {
       invokeAs('terminal.resize', { sessionKey, cols, rows }).catch(() => {})
     })
-    const observer = new ResizeObserver(() => fit.fit())
+    let wasVisible = !!hostRef.current?.getClientRects().length
+    const observer = new ResizeObserver(() => {
+      const visible = !!hostRef.current?.getClientRects().length
+      if (visible) {
+        fit.fit()
+        if (!wasVisible && (document.activeElement === document.body || hostRef.current?.contains(document.activeElement))) term.focus()
+      }
+      wasVisible = visible
+    })
     observer.observe(hostRef.current!)
     term.focus()
 
@@ -197,9 +267,12 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
       writeQueue.stop()
       if (writeQueueRef.current === writeQueue) writeQueueRef.current = null
       if (injectTimer !== undefined) clearTimeout(injectTimer)
+      unsubscribePrefs()
       observer.disconnect()
       dataSub.dispose()
       resizeSub.dispose()
+      selectionSub.dispose()
+      if (termRef.current === term) termRef.current = null
       term.dispose()
     }
     // 依赖只有 sessionKey：会话生命周期才是重建终端的唯一正当理由。
@@ -240,24 +313,24 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
     <div className="terminal-host">
       <div className="terminal-toolbar">
         <Space size={12} wrap>
-          <Tooltip title={t('term.broadcast')}>
+          <Tooltip title={t('term.broadcastScope')}>
             <Space size={4}>
-              <Switch size="small" checked={broadcast} onChange={setBroadcast} />
+              <Switch size="small" checked={broadcast} onChange={setBroadcast} aria-label={t('term.broadcast')} />
               <span className="toolbar-label">{t('term.broadcast')}</span>
               {broadcast && targets().length > 0 && <Tag color="blue">{targets().length + 1}</Tag>}
             </Space>
           </Tooltip>
-          <a onClick={openHistory}><HistoryOutlined /> {t('term.history')}</a>
-          <a
-            onClick={async () => {
-              try {
-                const text = await navigator.clipboard.readText()
-                if (text) sendRaw(text)
-              } catch { /* 剪贴板权限被拒时静默 */ }
-            }}
+          <button type="button" className="terminal-action" onClick={openHistory}><HistoryOutlined /> {t('term.history')}</button>
+          <Tooltip title={t('term.selectionHelp')}>
+            <button type="button" className="terminal-action" aria-label={t('term.copy')} disabled={!hasSelection} onClick={event => void copySelection(event.currentTarget)}>
+              <CopyOutlined /> {t('term.copy')}
+            </button>
+          </Tooltip>
+          <button type="button" className="terminal-action" aria-label={t('form.paste')}
+            onClick={event => pasteClipboard(event.currentTarget)}
           >
             <SnippetsOutlined /> {t('form.paste')}
-          </a>
+          </button>
           <Space size={4}>
             <ThunderboltOutlined />
             {quickCommands.map((q, i) => (
