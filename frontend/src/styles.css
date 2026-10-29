@@ -381,17 +381,6 @@ body[data-background-image="true"] .app-root {
   border-radius: 4px;
 }
 
-.history-line {
-  cursor: pointer;
-  font-family: var(--mono-font-family, Consolas, monospace);
-  font-size: 12px;
-  border-radius: var(--radius-sm);
-}
-
-.history-line:hover {
-  background: var(--hover-bg);
-}
-
 .terminal-xterm {
   flex: 1;
   min-height: 0;

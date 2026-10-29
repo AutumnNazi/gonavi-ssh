@@ -38,10 +38,47 @@ function fixture(t, extraEnv = {}) {
   fs.writeFileSync(path.join(dir, "frontend/node_modules/typescript/bin/tsc"), "const fs = require(\"node:fs\"); fs.appendFileSync(\"../build.trace\", \"tsc\\n\"); process.exit(Number(process.env.FAIL_TYPECHECK || 0));");
   fs.writeFileSync(path.join(dir, "frontend/node_modules/vite/bin/vite.js"), "const fs = require(\"node:fs\"); fs.appendFileSync(\"../build.trace\", \"vite\\n\"); process.exitCode = Number(process.env.FAIL_VITE || 0); if (process.exitCode) process.exit(process.exitCode); fs.mkdirSync(\"dist\", {recursive:true}); fs.writeFileSync(\"dist/index.html\", \"fresh frontend\");");
   const env = { ...process.env, ...extraEnv, PATH: path.join(dir, 'tools') + path.delimiter + process.env.PATH };
-  const build = () => run(bash, ['scripts/package.sh'], dir, env, path.join(dir, 'build.log'));
-  const zip = path.join(dir, 'dist/gonavi-ssh-v0.0.1.zip');
+  const build = (...versions) => run(bash, ['scripts/package.sh', ...versions], dir, env, path.join(dir, 'build.log'));
+  const version = JSON.parse(fs.readFileSync(path.join(dir, 'gonavi.plugin.json'), 'utf8')).version;
+  const zip = path.join(dir, 'dist/gonavi-ssh-v' + version + '.zip');
   return { dir, env, build, zip };
 }
+
+test('default and matching explicit archive versions follow the manifest', t => {
+  for (const file of ['gonavi.plugin.json', 'frontend/package.json', 'frontend/package-lock.json']) {
+    const metadata = JSON.parse(fs.readFileSync(path.join(root, file), 'utf8'));
+    assert.equal(metadata.version, '0.1.0', file);
+    if (metadata.packages) assert.equal(metadata.packages[''].version, '0.1.0', file + ' root package');
+  }
+  const f = fixture(t);
+  const manifest = JSON.parse(fs.readFileSync(path.join(f.dir, 'gonavi.plugin.json'), 'utf8'));
+  manifest.version = '1.2.3';
+  fs.writeFileSync(path.join(f.dir, 'gonavi.plugin.json'), JSON.stringify(manifest));
+  for (const versions of [[], [manifest.version]]) {
+    const result = f.build(...versions);
+    assert.equal(result.status, 0, result.output);
+    assert.ok(fs.existsSync(path.join(f.dir, 'dist/gonavi-ssh-v1.2.3.zip')), 'archive must use manifest version 1.2.3');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(f.dir, 'package/gonavi.plugin.json'), 'utf8')).version, '1.2.3');
+  }
+});
+
+test('mismatched explicit version fails before modifying package outputs', t => {
+  const f = fixture(t);
+  const marker = path.join(f.dir, 'package/keep.txt');
+  fs.mkdirSync(path.dirname(marker));
+  fs.writeFileSync(marker, 'keep staging');
+  fs.mkdirSync(path.dirname(f.zip));
+  fs.writeFileSync(f.zip, 'keep archive');
+  for (const version of ['9.9.9', '']) {
+    const result = f.build(version);
+    assert.equal(result.status, 1, result.output);
+    assert.match(result.output, /版本.*不一致/);
+    assert.equal(fs.readFileSync(marker, 'utf8'), 'keep staging');
+    assert.equal(fs.readFileSync(f.zip, 'utf8'), 'keep archive');
+    assert.equal(fs.existsSync(path.join(f.dir, 'dist/gonavi-ssh-v' + version + '.zip')), false);
+    assert.equal(fs.existsSync(path.join(f.dir, 'build.trace')), false);
+  }
+});
 
 test('archive has canonical root entries and all manifest declarations', t => {
   const f = fixture(t);

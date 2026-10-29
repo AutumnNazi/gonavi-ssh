@@ -5,6 +5,8 @@
 type Dict = Record<string, string>
 
 const zhCN: Dict = {
+  "term.inputClosed": "会话已结束，请重新连接后再输入。",
+  "term.inputUnavailable": "连接不可用，请重新连接后再输入。",
   "conn.statusInvalid": "连接状态响应无效，档案已保留，请刷新后重试。",
   "conn.selectAll": "全选",
   "conn.selectProfile": "选择 {name}",
@@ -67,7 +69,6 @@ const zhCN: Dict = {
   'term.copied': '已复制选中文本',
   'term.copyFailed': '复制失败，请允许剪贴板写入权限后重试。',
   'term.pasteFailed': '粘贴失败，请允许剪贴板读取权限后重试。',
-  'term.history': '历史命令',
   'term.quick': '快速命令',
   'term.ctrlc': 'Ctrl+C',
   'term.inputDropped': '部分输入可能未送达（连接繁忙），请确认终端内容。',
@@ -125,6 +126,8 @@ const zhCN: Dict = {
 }
 
 const zhTW: Dict = {
+  "term.inputClosed": "工作階段已結束，請重新連線後再輸入。",
+  "term.inputUnavailable": "連線無法使用，請重新連線後再輸入。",
   "conn.statusInvalid": "連線狀態回應無效，設定檔已保留，請重新整理後重試。",
   "conn.selectAll": "全選",
   "conn.selectProfile": "選取 {name}",
@@ -187,7 +190,6 @@ const zhTW: Dict = {
   'term.copied': '已複製選取文字',
   'term.copyFailed': '複製失敗，請允許剪貼簿寫入權限後重試。',
   'term.pasteFailed': '貼上失敗，請允許剪貼簿讀取權限後重試。',
-  'term.history': '歷史命令',
   'term.quick': '快速命令',
   'term.ctrlc': 'Ctrl+C',
   'term.inputDropped': '部分輸入可能未送達（連線繁忙），請確認終端機內容。',
@@ -245,6 +247,8 @@ const zhTW: Dict = {
 }
 
 const en: Dict = {
+  "term.inputClosed": "This session has ended. Reconnect before entering input.",
+  "term.inputUnavailable": "The connection is unavailable. Reconnect before entering input.",
   "conn.statusInvalid": "Invalid connection status response. Profiles were retained; refresh and try again.",
   "conn.selectAll": "Select all",
   "conn.selectProfile": "Select {name}",
@@ -307,7 +311,6 @@ const en: Dict = {
   'term.copied': 'Selected text copied',
   'term.copyFailed': 'Copy failed. Allow clipboard write access and try again.',
   'term.pasteFailed': 'Paste failed. Allow clipboard read access and try again.',
-  'term.history': 'History',
   'term.quick': 'Quick commands',
   'term.ctrlc': 'Ctrl+C',
   'term.inputDropped': 'Some input may not have been delivered (connection busy); please verify the terminal.',
@@ -365,6 +368,8 @@ const en: Dict = {
 }
 
 const ja: Dict = {
+  "term.inputClosed": "セッションは終了しました。再接続してから入力してください。",
+  "term.inputUnavailable": "接続を利用できません。再接続してから入力してください。",
   "conn.statusInvalid": "接続状態の応答が無効です。プロファイルは保持されました。更新して再試行してください。",
   "conn.selectAll": "すべて選択",
   "conn.selectProfile": "{name} を選択",
@@ -427,7 +432,6 @@ const ja: Dict = {
   'term.copied': '選択した文字をコピーしました',
   'term.copyFailed': 'コピーに失敗しました。クリップボードへの書き込みを許可して再試行してください。',
   'term.pasteFailed': '貼り付けに失敗しました。クリップボードの読み取りを許可して再試行してください。',
-  'term.history': '履歴',
   'term.quick': 'クイックコマンド',
   'term.ctrlc': 'Ctrl+C',
   'term.inputDropped': '一部の入力が届いていない可能性があります（接続が混雑）。ターミナルを確認してください。',
@@ -485,6 +489,8 @@ const ja: Dict = {
 }
 
 const de: Dict = {
+  "term.inputClosed": "Die Sitzung wurde beendet. Verbinden Sie sich erneut, bevor Sie Eingaben senden.",
+  "term.inputUnavailable": "Die Verbindung ist nicht verfügbar. Verbinden Sie sich erneut, bevor Sie Eingaben senden.",
   "conn.statusInvalid": "Ungültige Antwort zum Verbindungsstatus. Die Profile bleiben erhalten; aktualisieren Sie die Ansicht und versuchen Sie es erneut.",
   "conn.selectAll": "Alle auswählen",
   "conn.selectProfile": "{name} auswählen",
@@ -547,7 +553,6 @@ const de: Dict = {
   'term.copied': 'Markierter Text kopiert',
   'term.copyFailed': 'Kopieren fehlgeschlagen. Schreibzugriff auf die Zwischenablage erlauben und erneut versuchen.',
   'term.pasteFailed': 'Einfügen fehlgeschlagen. Lesezugriff auf die Zwischenablage erlauben und erneut versuchen.',
-  'term.history': 'Verlauf',
   'term.quick': 'Schnellbefehle',
   'term.ctrlc': 'Strg+C',
   'term.inputDropped': 'Einige Eingaben wurden möglicherweise nicht übertragen (Verbindung ausgelastet). Bitte Terminal prüfen.',
@@ -605,6 +610,8 @@ const de: Dict = {
 }
 
 const ru: Dict = {
+  "term.inputClosed": "Сеанс завершён. Подключитесь заново перед вводом.",
+  "term.inputUnavailable": "Подключение недоступно. Подключитесь заново перед вводом.",
   "conn.statusInvalid": "Некорректный ответ о состоянии подключений. Профили сохранены; обновите список и повторите попытку.",
   "conn.selectAll": "Выбрать все",
   "conn.selectProfile": "Выбрать {name}",
@@ -667,7 +674,6 @@ const ru: Dict = {
   'term.copied': 'Выделенный текст скопирован',
   'term.copyFailed': 'Не удалось скопировать. Разрешите запись в буфер обмена и повторите попытку.',
   'term.pasteFailed': 'Не удалось вставить. Разрешите чтение буфера обмена и повторите попытку.',
-  'term.history': 'История',
   'term.quick': 'Быстрые команды',
   'term.ctrlc': 'Ctrl+C',
   'term.inputDropped': 'Часть ввода могла не дойти (соединение занято). Проверьте терминал.',

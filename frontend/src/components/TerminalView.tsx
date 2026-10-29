@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { Drawer, List, Space, Switch, Tag, Tooltip, message } from 'antd'
-import { CopyOutlined, HistoryOutlined, SnippetsOutlined, ThunderboltOutlined } from '@ant-design/icons'
+import { Space, Switch, Tag, Tooltip, message } from 'antd'
+import { CopyOutlined, SnippetsOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
@@ -43,7 +43,7 @@ const INPUT_WARNING_INTERVAL_MS = 1500
 
 
 // 终端视图：sessionKey 由上层创建，这里只负责 xterm 渲染、长轮询、
-// 输入写入（可广播到同连接其他会话）、历史与快捷命令。
+// 输入写入（可广播到同连接其他会话）与快捷命令。
 // xterm 生命周期 effect 只依赖 sessionKey：广播目标与回调经 ref 传递，
 // 避免任何无关状态变化销毁重建终端实例。
 export function TerminalView({ tab, allTabs, onCwd }: Props) {
@@ -51,10 +51,9 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
   const termRef = useRef<Terminal | null>(null)
   const [hasSelection, setHasSelection] = useState(false)
   const [status, setStatus] = useState<'running' | 'closed' | 'error'>('running')
+  const inputStateRef = useRef<'running' | 'closed' | 'error'>('running')
   const [detail, setDetail] = useState('')
   const [broadcast, setBroadcast] = useState(false)
-  const [historyOpen, setHistoryOpen] = useState(false)
-  const [history, setHistory] = useState<string[]>([])
   const [quickCommands, setQuickCommands] = useState<QuickCommand[]>([])
   const sessionKey = tab.sessionKey ?? ''
 
@@ -75,15 +74,24 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
           .map(x => x.sessionKey!)
       : []
 
-  const warnInputDropped = () => {
+  const warnInputDropped = (reason?: 'ended' | 'unavailable') => {
+    if (reason) {
+      const state = reason === 'ended' ? 'closed' : 'error'
+      inputStateRef.current = state
+      setStatus(state)
+      setDetail(t(reason === 'ended' ? 'term.ended' : 'term.inputUnavailable'))
+    }
     const now = Date.now()
     if (now < nextInputWarningRef.current) return
     nextInputWarningRef.current = now + INPUT_WARNING_INTERVAL_MS
-    message.warning(t('term.inputDropped'))
+    const key = inputStateRef.current === 'closed' ? 'term.inputClosed'
+      : inputStateRef.current === 'error' ? 'term.inputUnavailable' : 'term.inputDropped'
+    message.warning(t(key))
   }
 
   // 请求与广播目标入队时固定；重试不会改变在途项或重复发送已知结果。
   const enqueueWrite = (data: string) => {
+    if (inputStateRef.current !== 'running') { warnInputDropped(); return false }
     const queue = writeQueueRef.current
     if (!queue) {
       warnInputDropped()
@@ -116,13 +124,14 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
   }
 
   const pasteClipboard = async (action?: HTMLElement) => {
+    if (inputStateRef.current !== 'running') { warnInputDropped(); return }
     const term = termRef.current
     const host = hostRef.current
     const queue = writeQueueRef.current
     if (!term || !host || !queue || !host.getClientRects().length) return
     const focusAtStart = document.activeElement
     const keys = [sessionKey, ...targets()]
-    const isCurrent = () => termRef.current === term && hostRef.current === host &&
+    const isCurrent = () => inputStateRef.current === 'running' && termRef.current === term && hostRef.current === host &&
       writeQueueRef.current === queue && !!host.getClientRects().length
     try {
       const text = await navigator.clipboard.readText()
@@ -141,9 +150,14 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
   useEffect(() => {
     if (!sessionKey) return
     let stopped = false
+    inputStateRef.current = 'running'
+    setStatus('running')
+    setDetail('')
     const writeQueue = createTerminalWriteQueue<WriteRequest>(
       (item, signal) => invokeAs(item.command, item.args, { signal }),
-      warnInputDropped,
+      reason => {
+        if (!stopped && writeQueueRef.current === writeQueue) warnInputDropped(reason)
+      },
     )
     writeQueueRef.current = writeQueue
     const decodeChunk = createStreamDecoder()
@@ -213,7 +227,7 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
 
     async function pollLoop() {
       let retries = 0
-      while (!stopped) {
+      while (!stopped && inputStateRef.current === 'running') {
         // 写优先：桥并发预算被长轮询占满时，先把槽位让给按键，
         // 避免 write 被持续拒绝。
         if (writeQueue.hasWork()) {
@@ -222,14 +236,14 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
             await new Promise(r => setTimeout(r, 50))
           }
         }
-        if (stopped) break
+        if (stopped || inputStateRef.current !== 'running') break
         try {
           const res = await invokeAs<ReadResult>('terminal.read', {
             sessionKey,
             maxBytes: 65536,
             waitMillis: 20000,
           })
-          if (stopped) break
+          if (stopped || inputStateRef.current !== 'running') break
           retries = 0
           if (res.dataBase64) {
             const text = decodeChunk(res.dataBase64)
@@ -239,15 +253,17 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
             if (m && m[1]) onCwdRef.current(m[1])
           }
           if (res.eof) {
+            inputStateRef.current = 'closed'
             writeQueue.stop()
             setStatus('closed')
             setDetail(res.hasExit ? t('term.exitCode', { code: res.exitCode ?? -1 }) : t('term.ended'))
             return
           }
         } catch (e) {
-          if (stopped) return
+          if (stopped || inputStateRef.current !== 'running') return
           // 瞬时失败（桥并发满/超时）退避重试；连续失败才终止。
           if (retries >= RETRY_MAX) {
+            inputStateRef.current = 'error'
             writeQueue.stop()
             setStatus('error')
             setDetail(describeError(e))
@@ -290,19 +306,6 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
       .catch(() => {})
   }, [])
 
-  const openHistory = async () => {
-    try {
-      const res = await invokeAs<{ lines: string[] }>('terminal.history', {
-        sessionKey,
-        limit: 200,
-      })
-      setHistory(res.lines ?? [])
-    } catch (e) {
-      message.error(describeError(e))
-    }
-    setHistoryOpen(true)
-  }
-
   const sendRaw = (data: string) => enqueueWrite(data)
 
   if (!sessionKey) {
@@ -320,7 +323,6 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
               {broadcast && targets().length > 0 && <Tag color="blue">{targets().length + 1}</Tag>}
             </Space>
           </Tooltip>
-          <button type="button" className="terminal-action" onClick={openHistory}><HistoryOutlined /> {t('term.history')}</button>
           <Tooltip title={t('term.selectionHelp')}>
             <button type="button" className="terminal-action" aria-label={t('term.copy')} disabled={!hasSelection} onClick={event => void copySelection(event.currentTarget)}>
               <CopyOutlined /> {t('term.copy')}
@@ -348,26 +350,6 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
       {status !== 'running' && (
         <div className="terminal-overlay"><span>{detail}</span></div>
       )}
-      <Drawer
-        title={t('term.history')}
-        open={historyOpen}
-        onClose={() => setHistoryOpen(false)}
-        width={420}
-      >
-        <List
-          size="small"
-          dataSource={[...history].reverse()}
-          renderItem={line => (
-            <List.Item
-              className="history-line"
-              onClick={() => sendRaw(line)}
-              title={line}
-            >
-              {line}
-            </List.Item>
-          )}
-        />
-      </Drawer>
     </div>
   )
 }

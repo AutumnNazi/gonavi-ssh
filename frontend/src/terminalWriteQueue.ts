@@ -1,7 +1,7 @@
 const MAX_PENDING_WRITES = 512
 const MAX_WRITE_RETRIES = 40
 
-export function createTerminalWriteQueue<T>(write: (item: T, signal: AbortSignal) => Promise<unknown>, warn: () => void) {
+export function createTerminalWriteQueue<T>(write: (item: T, signal: AbortSignal) => Promise<unknown>, warn: (reason?: 'ended' | 'unavailable') => void) {
   const pending: T[] = []
   let pumping = false
   let stopped = false
@@ -36,8 +36,8 @@ export function createTerminalWriteQueue<T>(write: (item: T, signal: AbortSignal
             // 只有宿主明确拒绝、尚未发送的请求才能重试同一在途项。
             const code = (e as { code?: unknown })?.code
             if (code === 4101) {
-              warn()
               stop()
+              warn('ended')
               return
             }
             if (code !== 'too_many_requests') {
@@ -45,8 +45,8 @@ export function createTerminalWriteQueue<T>(write: (item: T, signal: AbortSignal
               break
             }
             if (++failures > MAX_WRITE_RETRIES) {
-              warn()
               stop()
+              warn('unavailable')
               return
             }
             await new Promise<void>(resolve => {

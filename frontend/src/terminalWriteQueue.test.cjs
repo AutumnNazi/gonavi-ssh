@@ -207,6 +207,219 @@ test('retry exhaustion is bounded and reports unsent input instead of silently c
   assert.equal(warnings, 2)
 })
 
+function findNode(tree, predicate) {
+  if (!tree || typeof tree !== 'object') return
+  if (Array.isArray(tree)) return tree.map(node => findNode(node, predicate)).find(Boolean)
+  return predicate(tree) ? tree : findNode(tree.props?.children, predicate)
+}
+
+test('production terminal enters unavailable state after exactly 41 busy write failures and blocks clipboard access', async () => {
+  const attempts = []
+  let pasteReads = 0
+  const view = terminalView(async (command, args) => {
+    if (command === 'terminal.write') { attempts.push(args); throw { code: 'too_many_requests' } }
+  }, { readText: async () => { pasteReads++; return 'must not send' } }, undefined, { quickCommands: [{ name: 'quick', command: 'quick-command' }], cwdFollow: false })
+  const input = view.render()
+  try {
+    input('first'); input('queued')
+    await tick()
+    for (let retry = 1; retry <= 40; retry++) await view.time.next()
+    assert.equal(attempts.length, 41)
+    view.render()
+    const overlay = findNode(view.tree, node => node.props?.className === 'terminal-overlay')
+    assert.ok(overlay, 'exhausted write retries must expose an unavailable overlay rather than leave UI running')
+    assert.equal(overlay.props.children.props.children, 'term.inputUnavailable')
+    assert.equal(input('after-exhaustion'), false)
+    assert.equal(input('\x03'), false)
+    findNode(view.tree, node => node.props?.className === 'quick-cmd' && node.props.children === 'quick').props.onClick()
+    findNode(view.tree, node => node.props?.className === 'quick-cmd' && node.props.children === 'term.ctrlc').props.onClick()
+    await pasteButton(view.tree).props.onClick({ currentTarget: view.document.activeElement })
+    assert.equal(pasteReads, 0, 'unavailable paste must not read the clipboard')
+    assert.equal(attempts.length, 41, 'no further keys, Ctrl+C, quick command or paste may invoke write')
+    assert.deepEqual(view.warnings.map(warning => warning.text), ['term.inputUnavailable'])
+    view.setNow(1499); input('throttled')
+    assert.equal(view.warnings.length, 1)
+    view.setNow(1500)
+    await pasteButton(view.tree).props.onClick({ currentTarget: view.document.activeElement })
+    assert.deepEqual(view.warnings.map(warning => warning.text), ['term.inputUnavailable', 'term.inputUnavailable'])
+    assert.equal(pasteReads, 0)
+  } finally { await view.unmount() }
+})
+
+test('exhaustion reports its permanent reason only after aborting and cancelling queue retries', async () => {
+  const time = clock(), reasons = []
+  let signal
+  const input = queue(async (_item, current) => { signal = current; throw { code: 'too_many_requests' } }, reason => {
+    reasons.push(reason)
+    if (reason) {
+      assert.equal(signal.aborted, true)
+      assert.equal(input.hasWork(), false)
+      assert.equal(time.scheduled.filter(timer => !timer.cleared).length, 0)
+    }
+  }, time)
+  input.enqueue('first'); input.enqueue('queued')
+  await tick()
+  for (let retry = 1; retry <= 40; retry++) await time.next()
+  assert.deepEqual(reasons, ['unavailable'])
+  assert.equal(input.enqueue('stopped'), false)
+  assert.deepEqual(reasons, ['unavailable', undefined])
+})
+
+test('clipboard already in flight is ignored after write exhaustion while retained terminal output stays copyable', async () => {
+  const completion = deferred(), attempts = [], copied = []
+  const view = terminalView(async (_command, args) => { attempts.push(args); throw { code: 'too_many_requests' } }, {
+    readText: () => completion.promise, writeText: async text => copied.push(text),
+  })
+  const input = view.render()
+  try {
+    const term = view.terminals[0]
+    term.write('retained output 中文'); term.selection = 'retained output 中文'
+    const pending = pasteButton(view.tree).props.onClick({ currentTarget: view.document.activeElement })
+    input('first'); await tick()
+    for (let retry = 1; retry <= 40; retry++) await view.time.next()
+    const focusBefore = term.focusCount
+    completion.resolve('must not enter an unavailable shell')
+    await pending; await tick()
+    assert.equal(attempts.length, 41)
+    assert.equal(term.focusCount, focusBefore, 'late paste must not steal focus after failure')
+    view.render()
+    assert.equal(term.bufferText, 'retained output 中文')
+    assert.equal(term.disposed, undefined)
+    findNode(view.tree, node => node.type === 'button' && node.props['aria-label'] === 'term.copy').props.onClick({ currentTarget: view.document.activeElement })
+    await tick()
+    assert.deepEqual(copied, ['retained output 中文'])
+    assert.deepEqual(view.notices, [{ type: 'success', text: 'term.copied' }])
+    view.reads[0].resolve({ dataBase64: Buffer.from('late read must be ignored').toString('base64'), eof: true, hasExit: true, exitCode: 0 })
+    await tick(); view.render()
+    assert.equal(term.bufferText, 'retained output 中文')
+    assert.equal(findNode(view.tree, node => node.props?.className === 'terminal-overlay').props.children.props.children, 'term.inputUnavailable')
+    assert.equal(view.reads.length, 1, 'late EOF may neither replace error with closed nor continue read pumping')
+  } finally { completion.resolve('ignored'); await view.unmount() }
+})
+
+test('a replacement session rebuilds writable running state after old write exhaustion', async () => {
+  const sent = []
+  let pasteReads = 0
+  const view = terminalView(async (_command, args) => {
+    sent.push(args)
+    if (args.sessionKey === 'old') throw { code: 'too_many_requests' }
+  }, { readText: async () => { pasteReads++; return 'fresh paste' } })
+  const input = view.render('old')
+  try {
+    input('old input'); await tick()
+    for (let retry = 1; retry <= 40; retry++) await view.time.next()
+    view.render('old')
+    assert.ok(findNode(view.tree, node => node.props?.className === 'terminal-overlay'))
+    const newInput = view.render('fresh')
+    view.render('fresh')
+    assert.equal(findNode(view.tree, node => node.props?.className === 'terminal-overlay'), undefined)
+    assert.equal(newInput('new input'), true)
+    await pasteButton(view.tree).props.onClick({ currentTarget: view.document.activeElement })
+    await tick()
+    assert.equal(pasteReads, 1)
+    assert.equal(sent.length, 43)
+    assert.deepEqual(sent.slice(-2).map(args => args.sessionKey), ['fresh', 'fresh'])
+    assert.equal(view.terminals[0].disposed, true)
+    assert.equal(view.terminals[1].disposed, undefined)
+  } finally { await view.unmount() }
+})
+
+for (const code of [4101, 'too_many_requests']) {
+  test('late old-session final write failure ' + code + ' cannot close or poison the replacement session', async () => {
+    const last = deferred(), sent = [], signals = []
+    let oldAttempts = 0
+    const view = terminalView(async (_command, args, options) => {
+      sent.push(args); signals.push(options.signal)
+      if (args.sessionKey === 'old') {
+        if (++oldAttempts === 41) return last.promise
+        throw { code: 'too_many_requests' }
+      }
+    })
+    view.render('old')('old input'); await tick()
+    try {
+      for (let retry = 1; retry <= 40; retry++) await view.time.next()
+      const oldRead = view.reads[0]
+      const newInput = view.render('fresh')
+      assert.equal(signals[0].aborted, true)
+      last.reject({ code })
+      if (code === 4101) oldRead.resolve({ dataBase64: Buffer.from('old output').toString('base64'), eof: true, hasExit: false })
+      else oldRead.reject(new Error('old read failed after replacement'))
+      await tick(); view.render('fresh')
+      assert.equal(findNode(view.tree, node => node.props?.className === 'terminal-overlay'), undefined)
+      assert.equal(view.terminals[1].bufferText, '')
+      assert.equal(newInput('new input'), true)
+      await tick()
+      assert.equal(sent.at(-1).sessionKey, 'fresh')
+      assert.deepEqual(view.warnings, [])
+      assert.equal(view.time.scheduled.filter(timer => !timer.cleared).length, 0)
+    } finally { last.resolve(); await view.unmount() }
+  })
+}
+
+test('unknown first write outcome preserves later accepted order and still allows clipboard and keyboard input', async () => {
+  const first = deferred(), attempts = []
+  let pasteReads = 0
+  const view = terminalView(async (_command, args) => {
+    attempts.push(new TextDecoder().decode(Buffer.from(args.dataBase64, 'base64')))
+    if (attempts.length === 1) await first.promise
+  }, { readText: async () => { pasteReads++; return 'paste' } })
+  const input = view.render()
+  try {
+    input('unknown'); input('second'); input('third')
+    first.reject({ code: 'timeout' }); await tick(); view.render()
+    assert.equal(findNode(view.tree, node => node.props?.className === 'terminal-overlay'), undefined)
+    assert.deepEqual(attempts, ['unknown', 'second', 'third'])
+    assert.equal(input('fourth'), true)
+    await pasteButton(view.tree).props.onClick({ currentTarget: view.document.activeElement }); await tick()
+    assert.equal(pasteReads, 1)
+    assert.deepEqual(attempts, ['unknown', 'second', 'third', 'fourth', 'paste'])
+    assert.deepEqual(view.warnings.map(w => w.text), ['term.inputDropped'])
+  } finally { first.resolve(); await view.unmount() }
+})
+
+test('capacity refusal does not mark the production terminal unavailable or prevent later paste', async () => {
+  const first = deferred(), sent = []
+  let pasteReads = 0
+  const view = terminalView(async (_command, args) => {
+    sent.push(new TextDecoder().decode(Buffer.from(args.dataBase64, 'base64')))
+    if (sent.length === 1) await first.promise
+  }, { readText: async () => { pasteReads++; return 'post-capacity paste' } })
+  const input = view.render()
+  try {
+    for (let i = 0; i < 513; i++) assert.equal(input(String(i)), true)
+    assert.equal(input('capacity-refused'), false)
+    view.render()
+    assert.equal(findNode(view.tree, node => node.props?.className === 'terminal-overlay'), undefined)
+    first.resolve(); await tick()
+    assert.deepEqual(sent, Array.from({ length: 513 }, (_, i) => String(i)))
+    await pasteButton(view.tree).props.onClick({ currentTarget: view.document.activeElement })
+    assert.equal(input('post-capacity keyboard'), true); await tick()
+    assert.equal(pasteReads, 1)
+    assert.deepEqual(sent.slice(-2), ['post-capacity paste', 'post-capacity keyboard'])
+    assert.deepEqual(view.warnings.map(w => w.text), ['term.inputDropped'])
+  } finally { first.resolve(); await view.unmount() }
+})
+
+test('read yielding already in progress does not issue one extra read after write exhaustion', async () => {
+  const attempts = []
+  const view = terminalView(async (_command, args) => { attempts.push(args); throw { code: 'too_many_requests' } })
+  view.render()('busy input'); await tick()
+  try {
+    view.reads[0].resolve({ dataBase64: '', eof: false, hasExit: false }); await tick()
+    assert.ok(view.time.scheduled.some(timer => timer.delay === 50 && !timer.cleared))
+    for (let retry = 1; retry <= 40; retry++) {
+      const timer = view.time.scheduled.find(timer => timer.delay !== 50 && !timer.cleared)
+      assert.ok(timer); timer.cleared = true; timer.fn(); await tick()
+    }
+    assert.equal(attempts.length, 41)
+    for (const timer of view.time.scheduled.filter(timer => !timer.cleared)) {
+      timer.cleared = true; timer.fn(); await tick()
+    }
+    assert.equal(view.reads.length, 1, 'yield completion must check unavailable state before bridge invoke')
+    assert.equal(view.time.scheduled.filter(timer => !timer.cleared).length, 0)
+  } finally { await view.unmount() }
+})
+
 test('busy overflow preserves the in-flight request identity and every accepted queued byte', async () => {
   const time = clock()
   const first = deferred()
@@ -262,7 +475,7 @@ function pollLoop(globals) {
   assert.ok(poll, 'production polling loop is present')
   const output = ts.transpileModule(poll.getText(ast), { compilerOptions: { target: ts.ScriptTarget.ES2021 } }).outputText
   const context = {
-    stopped: false, RETRY_MAX: 8, RETRY_BASE_MS: 500, RETRY_CAP_MS: 5000,
+    stopped: false, inputStateRef: { current: 'running' }, RETRY_MAX: 8, RETRY_BASE_MS: 500, RETRY_CAP_MS: 5000,
     setStatus: () => {}, setDetail: () => {}, describeError: String, t: key => key,
     osc7Re: /never-match/, onCwdRef: { current: () => {} }, ...globals,
   }
@@ -360,7 +573,7 @@ test('poll EOF and exhausted read retries stop writes before reporting terminal 
   }
 })
 
-function terminalView(write, clipboard = { writeText: async () => {} }, initialPrefs) {
+function terminalView(write, clipboard = { writeText: async () => {} }, initialPrefs, settings = { quickCommands: [], cwdFollow: false }) {
   const time = clock()
   const hooks = [], effects = [], pending = [], terminals = [], warnings = [], notices = [], reads = [], observers = []
   let cursor = 0, now = 0, hostVisible = true, rendered
@@ -412,7 +625,7 @@ function terminalView(write, clipboard = { writeText: async () => {} }, initialP
       reads.push(result)
       return result.promise
     }
-    if (command === 'settings.get') return { settings: { quickCommands: [], cwdFollow: false } }
+    if (command === 'settings.get') return { settings }
     return write(command, args, options)
   }
   const hostPrefs = loadTs(path.join(__dirname, 'hostPrefs.ts'), { window, navigator: { language: 'en-US' }, document })
@@ -441,12 +654,13 @@ function terminalView(write, clipboard = { writeText: async () => {} }, initialP
     return terminals.at(-1).input
   }
   return {
-    warnings, notices, time, terminals, render, observers, document, hostPrefs,
+    warnings, notices, time, terminals, render, observers, document, hostPrefs, reads,
     get tree() { return rendered },
     preferences(value) { window.gonaviHostPrefs = value; window.dispatchEvent(new Event('gonavi:host-preferences')) },
     setVisible(value) { hostVisible = value; observers.at(-1).callback() },
     setNow(value) { now = value },
     closeSession() { reads.at(-1).resolve({ dataBase64: '', eof: true, hasExit: false }) },
+    failRead(error) { reads.at(-1).reject(error) },
     async unmount() {
       for (const effect of effects) effect?.cleanup?.()
       for (const result of reads) result.resolve({ dataBase64: '', eof: false })
@@ -669,7 +883,7 @@ test('new terminal copy and scope messages exist in all six locale catalogs', ()
   const dictionaries = ast.statements.filter(ts.isVariableStatement).flatMap(s => [...s.declarationList.declarations])
     .filter(d => ['zhCN', 'zhTW', 'en', 'ja', 'de', 'ru'].includes(d.name.getText(ast)))
   assert.equal(dictionaries.length, 6)
-  const newKeys = ['term.copy', 'term.broadcastScope', 'term.selectionHelp', 'term.copied', 'term.copyFailed', 'term.pasteFailed']
+  const newKeys = ['term.copy', 'term.broadcastScope', 'term.selectionHelp', 'term.copied', 'term.copyFailed', 'term.pasteFailed', 'term.inputClosed', 'term.inputUnavailable']
   for (const dict of dictionaries) {
     const properties = dict.initializer.properties
     const keys = properties.map(p => p.name.text)
@@ -765,6 +979,96 @@ test('UI warning interval is shared by missing queue and stopped input across re
   assert.equal(view.time.scheduled.length, 0, 'session switch and unmount leave no warning timers')
 })
 
+
+
+test('typing after EOF explains that the session ended without reporting congestion or writing input', async () => {
+  const sent = []
+  const view = terminalView(async (command, args) => sent.push({ command, args }))
+  const input = view.render()
+  try {
+    view.closeSession()
+    await tick()
+    for (let i = 0; i < 50; i++) assert.equal(input('after-end'), false)
+    assert.deepEqual(sent, [])
+    assert.deepEqual(view.warnings.map(w => w.text), ['term.inputClosed'])
+    view.setNow(1500)
+    assert.equal(input(''), false)
+    assert.deepEqual(view.warnings.map(w => w.text), ['term.inputClosed', 'term.inputClosed'])
+    view.render('new-session')
+    assert.equal(view.terminals.at(-1).input('explicit-new-session'), true)
+    await tick()
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].args.sessionKey, 'new-session')
+  } finally { await view.unmount() }
+})
+
+test('exhausted reads explain that the connection is unavailable rather than busy', async () => {
+  const sent = []
+  const view = terminalView(async (command, args) => sent.push({ command, args }))
+  const input = view.render()
+  try {
+    for (let failure = 0; failure < 9; failure++) {
+      view.failRead(new Error('transport unavailable'))
+      await tick()
+      if (failure < 8) await view.time.next()
+    }
+    assert.equal(input('no-connection'), false)
+    assert.deepEqual(sent, [])
+    assert.deepEqual(view.warnings.map(w => w.text), ['term.inputUnavailable'])
+  } finally { await view.unmount() }
+})
+
+test('a session-not-found write reports ended immediately and rejects later input', async () => {
+  const attempts = []
+  const view = terminalView(async (command, args) => { attempts.push({ command, args }); throw { code: 4101 } })
+  const input = view.render()
+  try {
+    input('first-unknown-session')
+    await tick()
+    assert.deepEqual(view.warnings.map(w => w.text), ['term.inputClosed'])
+    assert.equal(input('second'), false)
+    assert.equal(attempts.length, 1)
+    assert.deepEqual(view.warnings.map(w => w.text), ['term.inputClosed'])
+  } finally { await view.unmount() }
+})
+
+test('paste is not read after EOF, while copying retained output still works', async () => {
+  const sent = [], copied = []
+  let reads = 0
+  const view = terminalView(async (command, args) => sent.push({ command, args }), {
+    readText: async () => { reads++; return 'ended paste' },
+    writeText: async text => copied.push(text),
+  })
+  view.render()
+  try {
+    view.closeSession()
+    await tick()
+    const pending = pasteButton(view.tree).props.onClick({ currentTarget: view.document.activeElement })
+    await pending; await tick()
+    assert.equal(reads, 0)
+    assert.deepEqual(sent, [])
+    assert.deepEqual(view.warnings.map(w => w.text), ['term.inputClosed'])
+    copySelected(view)
+    await tick()
+    assert.deepEqual(copied, ['clipboard selected text'])
+    assert.deepEqual(sent, [])
+  } finally { await view.unmount() }
+})
+
+test('a clipboard read already in progress cannot enqueue after the session reaches EOF', async () => {
+  const completion = deferred(), sent = []
+  const view = terminalView(async (command, args) => sent.push({ command, args }), { readText: () => completion.promise })
+  view.render()
+  try {
+    const pending = pasteButton(view.tree).props.onClick({ currentTarget: view.document.activeElement })
+    view.closeSession(); await tick()
+    completion.resolve('old clipboard input')
+    await pending; await tick()
+    assert.deepEqual(sent, [])
+    assert.deepEqual(view.warnings, [])
+  } finally { await view.unmount() }
+})
+
 test('UI warning throttles are per view and ignore late unknown outcomes after unmount', async () => {
   const late = deferred()
   const old = terminalView(async () => late.promise)
@@ -843,6 +1147,31 @@ test('terminal preference listener unmounts without late theme mutation and font
   assert.equal(term.disposed, true)
 })
 
+
+
+
+test('terminal exposes no plugin history action or drawer and leaves shell history input unchanged', async () => {
+  const sent = []
+  const view = terminalView(async (command, args) => sent.push({ command, args }))
+  const input = view.render()
+  try {
+    const nodes = []
+    const visit = node => {
+      if (!node || typeof node !== 'object') return
+      if (Array.isArray(node)) { node.forEach(visit); return }
+      nodes.push(node)
+      visit(node.props?.children)
+    }
+    visit(view.tree)
+    assert.equal(nodes.filter(node => node.type === 'Drawer').length, 0, 'plugin history drawer must be removed')
+    assert.equal(nodes.filter(node => node.type === 'button' && node.props?.children?.includes?.('term.history')).length, 0)
+    assert.equal(input('history\r'), true)
+    await tick()
+    assert.deepEqual(sent.map(call => call.command), ['terminal.write'])
+    assert.equal(new TextDecoder().decode(Buffer.from(sent[0].args.dataBase64, 'base64')), 'history\r')
+    assert.equal(sent.some(call => call.command === 'terminal.history'), false)
+  } finally { await view.unmount() }
+})
 
 test('terminal instructions occupy only copy and broadcast tooltips, with readable alpha selection', async () => {
   const view = terminalView(async () => {}, undefined, { locale: 'en-US', theme: 'dark', palette: { code: '#1b1d21', accentSoft: 'rgba(121, 166, 147, 0.16)' } })

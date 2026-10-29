@@ -5,7 +5,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${1:-0.0.1}"
+MANIFEST_VERSION="$(node -p "require(process.argv[1]).version" "$ROOT/gonavi.plugin.json")"
+VERSION="${1-$MANIFEST_VERSION}"
+if [ "$VERSION" != "$MANIFEST_VERSION" ]; then
+  echo "错误：显式版本 $VERSION 与清单版本 $MANIFEST_VERSION 不一致" >&2
+  exit 1
+fi
 STAGE="$ROOT/package"
 OUT="$ROOT/dist/gonavi-ssh-v$VERSION.zip"
 

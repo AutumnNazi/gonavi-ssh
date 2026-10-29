@@ -31,6 +31,7 @@ import { invokeAs, describeError } from '../bridge'
 import { decodeText, encodeText } from '../b64'
 import { t } from '../i18n'
 import type { ConnectionInfo, FsEntry, ProfileView, TransferStatus } from '../types'
+import { createPaneRequests, type PaneScope } from './sftpRequests'
 
 type Side = 'left' | 'right'
 type PaneKind = 'local' | 'remote'
@@ -167,12 +168,19 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
   const [rightMore, setRightMore] = useState(false)
   const [rightOffset, setRightOffset] = useState(0)
   const [editRightPath, setEditRightPath] = useState(false)
+  const [pathDraft, setPathDraft] = useState({ left: '', right: '' })
   const rightNav = useNavHistory()
 
   const [transfers, setTransfers] = useState<TransferStatus[]>([])
-  const [preview, setPreview] = useState<{ path: string; content: string; dirty: string; side: Side; truncated: boolean } | null>(null)
-  const [du, setDu] = useState<{ side: Side; text: string } | null>(null)
+  const [preview, setPreview] = useState<{ path: string; content: string; dirty: string; side: Side; scope: PaneScope; token: number; truncated: boolean } | null>(null)
+  const previewRequest = useRef(0)
+  const previewSaving = useRef<number | null>(null)
+  const [du, setDu] = useState<{ side: Side; text: string; scope: PaneScope } | null>(null)
+  const paneRequests = useRef({ left: createPaneRequests(), right: createPaneRequests() })
+  const entryScopes = useRef<Record<Side, PaneScope>>({ left: { epoch: -1 }, right: { epoch: -1 } })
+  const duRequest = useRef({ left: 0, right: 0 })
   const [busyProfile, setBusyProfile] = useState('')
+  const connectingProfiles = useRef(new Set<string>())
 
   const leftConn = leftKind === 'remote'
     ? connections.find(c => c.profileId === leftProfileId && c.state === 'ready' && c.alive)
@@ -180,6 +188,15 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
   const rightConn = rightKind === 'remote'
     ? connections.find(c => c.profileId === rightProfileId && c.state === 'ready' && c.alive)
     : undefined
+
+  paneRequests.current.left.bind([leftKind, leftProfileId, leftConn?.connectionId ?? '', leftPath])
+  paneRequests.current.right.bind([rightKind, rightProfileId, rightConn?.connectionId ?? '', rightPath])
+  useEffect(() => () => {
+    paneRequests.current.left.invalidate()
+    paneRequests.current.right.invalidate()
+    duRequest.current.left++; duRequest.current.right++
+    previewRequest.current++
+  }, [])
 
   const profileOptions = useMemo(
     () => profiles.map(p => ({
@@ -202,10 +219,11 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
     }
   }, [profiles, connections, rightKind, leftKind, rightProfileId, leftProfileId])
 
-  // 自动连接：选中的档案未连接时发起连接并轮询就绪。
+  // 仅用户选择服务器或点击连接时建连；状态刷新不能撤销手动断开。
   const ensureConn = useCallback(async (profileId: string) => {
-    if (!profileId) return
+    if (!profiles.some(p => p.id === profileId) || connectingProfiles.current.has(profileId)) return
     if (connections.some(c => c.profileId === profileId && c.state === 'ready' && c.alive)) return
+    connectingProfiles.current.add(profileId)
     setBusyProfile(profileId)
     try {
       const st = await invokeAs<ConnectionInfo>('conn.open', { profileId })
@@ -214,12 +232,16 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
         onConnectionsChanged()
         return
       }
+      if (st.state === 'needInput') { message.warning(t('sftp.needAuth')); onConnectionsChanged(); return }
+      if (st.state === 'failed' || st.state === 'cancelled') { message.error(st.error ?? t('form.testFailed')); onConnectionsChanged(); return }
+      if (!st.connectionId) return
       while (Date.now() < deadline) {
         const res = await invokeAs<{ connections: ConnectionInfo[] }>('conn.status', {
           connectionId: st.connectionId,
         })
         const conn = res.connections?.[0]
-        if (conn?.state === 'ready') {
+        if (!conn) return // 手动断开已摘除连接，停止本次等待而不是再次建连。
+        if (conn.state === 'ready') {
           onConnectionsChanged()
           return
         }
@@ -239,52 +261,49 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
     } catch (e) {
       message.error(describeError(e))
     } finally {
-      setBusyProfile('')
+      connectingProfiles.current.delete(profileId)
+      setBusyProfile(current => current === profileId ? '' : current)
     }
-  }, [connections, onConnectionsChanged])
+  }, [profiles, connections, onConnectionsChanged])
 
-  // 通用加载：远端走 sftp.list，本机走 fs.listLocal（空路径返回 home）。
+  // 请求源身份在发出时冻结，路径/连接/刷新变化后只允许当前世代落地。
   const loadSide = useCallback(async (side: Side, path: string, offset = 0) => {
     const kind = side === 'left' ? leftKind : rightKind
     const conn = side === 'left' ? leftConn : rightConn
-    if (kind === 'remote' && !conn) return
+    const profileId = side === 'left' ? leftProfileId : rightProfileId
+    const requests = paneRequests.current[side]
+    requests.bind([kind, profileId, conn?.connectionId ?? '', path])
+    const request = requests.begin(offset)
+    if (!request || (kind === 'remote' && !conn)) return
+    if (offset === 0) {
+      if (side === 'left') { setLeftEntries([]); setLeftSel(null); setLeftMore(false); setLeftOffset(0) }
+      else { setRightEntries([]); setRightSel(null); setRightMore(false); setRightOffset(0) }
+      setDu(current => current?.side === side ? null : current)
+    }
     try {
-      if (kind === 'local') {
-        const res = await invokeAs<{ entries: FsEntry[]; home: string }>('fs.listLocal', { path })
-        if (side === 'left') {
-          setLeftEntries(res.entries ?? [])
-          if (!path && res.home) {
-            setLeftPath(res.home)
-            leftNav.push(res.home)
-          }
-        } else {
-          setRightEntries(res.entries ?? [])
-          if (!path && res.home) {
-            setRightPath(res.home)
-            rightNav.push(res.home)
-          }
-        }
-        return
-      }
-      const res = await invokeAs<{ entries: FsEntry[]; more: boolean }>('sftp.list', {
-        connectionId: conn!.connectionId, path: path || '.', offset, limit: 500,
-      })
+      const res = kind === 'local'
+        ? await invokeAs<{ entries: FsEntry[]; home?: string; more?: boolean }>('fs.listLocal', { path })
+        : await invokeAs<{ entries: FsEntry[]; home?: string; more?: boolean }>('sftp.list', {
+          connectionId: conn!.connectionId, path: path || '.', offset, limit: 500,
+        })
+      if (!requests.accepts(request)) return
+      const resolvedPath = kind === 'local' && !path && res.home ? res.home : path
+      if (!requests.finish(request, [kind, profileId, conn?.connectionId ?? '', resolvedPath])) return
+      entryScopes.current[side] = request.scope
+      const append = (prev: FsEntry[]) => offset === 0 ? res.entries ?? []
+        : [...prev, ...(res.entries ?? []).filter(entry => !prev.some(old => old.path === entry.path))]
       if (side === 'left') {
-        if (offset === 0) setLeftEntries(res.entries ?? [])
-        else setLeftEntries(prev => [...prev, ...(res.entries ?? [])])
-        setLeftMore(res.more)
-        setLeftOffset(offset)
+        setLeftEntries(append); setLeftMore(!!res.more); setLeftOffset(offset)
+        if (resolvedPath !== path) { setLeftPath(resolvedPath); leftNav.push(resolvedPath) }
       } else {
-        if (offset === 0) setRightEntries(res.entries ?? [])
-        else setRightEntries(prev => [...prev, ...(res.entries ?? [])])
-        setRightMore(res.more)
-        setRightOffset(offset)
+        setRightEntries(append); setRightMore(!!res.more); setRightOffset(offset)
+        if (resolvedPath !== path) { setRightPath(resolvedPath); rightNav.push(resolvedPath) }
       }
     } catch (e) {
-      message.error(describeError(e))
+      if (requests.fail(request)) message.error(describeError(e))
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [leftKind, rightKind, leftConn, rightConn])
+  }, [leftKind, rightKind, leftProfileId, rightProfileId, leftConn, rightConn])
 
   // 打开路径（记录历史）。
   const openSide = useCallback((side: Side, path: string) => {
@@ -312,49 +331,49 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
 
   // 切换本机/服务器：清空该栏历史与内容，避免两边路径混入同一份历史。
   const switchKind = (side: Side, kind: PaneKind) => {
+    paneRequests.current[side].invalidate()
+    const current = side === 'left' ? leftProfileId : rightProfileId
+    const fallback = side === 'left'
+      ? profiles.find(p => p.id !== rightProfileId)
+      : profiles.find(p => connections.some(c => c.profileId === p.id && c.state === 'ready' && c.alive))
+    const profileId = profiles.find(p => p.id === current)?.id ?? (fallback ?? profiles[0])?.id ?? ''
     if (side === 'left') {
       setLeftKind(kind)
       setLeftPath('')
       setLeftEntries([])
       setLeftSel(null)
       leftNav.reset()
-      setDu(null)
-      if (kind === 'remote' && leftProfileId) void ensureConn(leftProfileId)
-      else if (kind === 'local') void loadSide('left', '', 0)
+      if (kind === 'remote') setLeftProfileId(profileId)
     } else {
       setRightKind(kind)
       setRightPath('')
       setRightEntries([])
       setRightSel(null)
       rightNav.reset()
-      if (kind === 'remote' && rightProfileId) void ensureConn(rightProfileId)
-      else if (kind === 'local') void loadSide('right', '', 0)
+      if (kind === 'remote') setRightProfileId(profileId)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (kind === 'remote') void ensureConn(profileId)
   }
 
   // 连接就绪 / 模式切换后加载目录。
   useEffect(() => {
-    if (leftKind === 'remote' && leftConn) {
-      openSide('left', leftPath || '.')
+    if (leftKind === 'remote') {
+      if (leftConn) openSide('left', leftPath)
+      else { setLeftEntries([]); setLeftSel(null); setLeftMore(false); setDu(current => current?.side === 'left' ? null : current) }
     } else if (leftKind === 'local' && leftEntries.length === 0) {
       void loadSide('left', '', 0)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [leftConn?.connectionId, leftKind])
+  }, [leftConn?.connectionId, leftKind, leftProfileId])
   useEffect(() => {
     if (rightKind === 'remote') {
-      if (rightProfileId) void ensureConn(rightProfileId)
-      if (rightConn) openSide('right', rightPath || '.')
+      if (rightConn) openSide('right', rightPath)
+      else { setRightEntries([]); setRightSel(null); setRightMore(false); setDu(current => current?.side === 'right' ? null : current) }
     } else if (rightEntries.length === 0) {
       void loadSide('right', '', 0)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rightConn?.connectionId, rightKind, rightProfileId])
-  useEffect(() => {
-    if (leftKind === 'remote' && leftProfileId) void ensureConn(leftProfileId)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [leftKind, leftProfileId])
   useEffect(() => {
     // 终端目录跟随：刷新右侧远程（默认栏）到新目录。
     if (initialRemotePath && rightKind === 'remote' && rightConn) {
@@ -387,8 +406,9 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
   }, [])
 
   // 把 from 栏选中项送到对侧：本地↔远端 / 远端↔远端。
-  const sendToPeer = async (from: Side) => {
+  const sendToPeer = async (from: Side, scope: PaneScope) => {
     if (peerSame) { message.warning(t('sftp.peerSame')); return }
+    if (!paneRequests.current[from].source(scope)) return
     const srcSel = from === 'left' ? leftSel : rightSel
     const srcKind = from === 'left' ? leftKind : rightKind
     const dstKind = from === 'left' ? rightKind : leftKind
@@ -429,7 +449,7 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
   }
 
   // 本机栏上传按钮：原生选择器选文件后送入对侧远端（对侧须为服务器）。
-  const uploadFromPicker = async (side: Side) => {
+  const uploadFromPicker = async (side: Side, scope: PaneScope) => {
     const dstConn = side === 'left' ? rightConn : leftConn
     const dstPath = side === 'left' ? rightPath : leftPath
     const dstKind = side === 'left' ? rightKind : leftKind
@@ -437,12 +457,14 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
       message.warning(t('sftp.sendToPeer'))
       return
     }
+    const targetSide = side === 'left' ? 'right' : 'left'
+    const targetScope = paneRequests.current[targetSide].capture()
     const pickFile = window.gonaviPlugin?.pickFile?.bind(window.gonaviPlugin)
-    if (!pickFile) { await sendToPeer(side); return }
+    if (!pickFile) { await sendToPeer(side, scope); return }
     try {
       const picked = await pickFile({ title: t('sftp.upload') })
-      if (picked === null) return
-      if (!picked) { await sendToPeer(side); return }
+      if (!paneRequests.current[targetSide].current(targetScope) || picked === null) return
+      if (!picked) { await sendToPeer(side, scope); return }
       const name = picked.split(/[\\/]/).pop() || 'file'
       await invokeAs('transfer.start', {
         connectionId: dstConn.connectionId, direction: 'upload',
@@ -454,39 +476,52 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
     }
   }
 
-  const doPreview = async (entry: FsEntry, side: Side) => {
+  const doPreview = async (entry: FsEntry, side: Side, scope: PaneScope) => {
+    const requests = paneRequests.current[side]
+    if (!requests.source(scope)) return
     const conn = side === 'left' ? leftConn : rightConn
     const kind = side === 'left' ? leftKind : rightKind
     if (kind === 'remote' && !conn) return
     if (kind === 'local') return // 本地不提供预览编辑（避免误改本机文件）
+    const token = ++previewRequest.current
+    const current = () => token === previewRequest.current && requests.source(scope)
+    setPreview(null)
     try {
       const res = await invokeAs<{ dataBase64: string; truncated?: boolean }>('sftp.preview', {
         connectionId: conn!.connectionId, path: entry.path, maxBytes: 262144,
       })
+      if (!current()) return
       const text = decodeText(res.dataBase64)
       const nul = [...text].filter(c => c === '\u0000').length
       if (nul > text.length / 100) {
         message.warning(`${entry.name}: binary`)
         return
       }
-      setPreview({ path: entry.path, content: text, dirty: text, side, truncated: !!res.truncated })
+      setPreview({ path: entry.path, content: text, dirty: text, side, scope, token, truncated: !!res.truncated })
     } catch (e) {
-      message.error(describeError(e))
+      if (current()) message.error(describeError(e))
     }
   }
 
   const savePreview = async () => {
-    if (!preview) return
+    if (!preview || preview.token !== previewRequest.current || previewSaving.current === preview.token || !paneRequests.current[preview.side].source(preview.scope)) return
     const conn = preview.side === 'left' ? leftConn : rightConn
     if (!conn) return
+    const token = preview.token
+    const current = () => token === previewRequest.current && paneRequests.current[preview.side].source(preview.scope)
+    previewSaving.current = token
     try {
       await invokeAs('sftp.writeFile', {
         connectionId: conn.connectionId, path: preview.path, dataBase64: encodeText(preview.dirty),
       })
+      if (!current()) return
+      previewRequest.current++
       message.success(t('sftp.saveFile'))
       setPreview(null)
     } catch (e) {
-      message.error(describeError(e))
+      if (current()) message.error(describeError(e))
+    } finally {
+      if (previewSaving.current === token) previewSaving.current = null
     }
   }
 
@@ -501,33 +536,32 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
       })
     })
 
-  const remoteAction = async (side: Side, action: string, args: Record<string, unknown>) => {
+  const remoteAction = async (side: Side, action: string, args: Record<string, unknown>, scope: PaneScope) => {
+    const requests = paneRequests.current[side]
     const conn = side === 'left' ? leftConn : rightConn
-    if (!conn) return
+    if (!conn || !requests.current(scope)) return
     try {
       await invokeAs(action, { connectionId: conn.connectionId, ...args })
-      void loadSide(side, side === 'left' ? leftPath : rightPath, 0)
+      if (requests.current(scope)) void loadSide(side, side === 'left' ? leftPath : rightPath, 0)
     } catch (e) {
-      message.error(describeError(e))
+      if (requests.current(scope)) message.error(describeError(e))
     }
   }
 
   // 磁盘用量：作用于点击的远程栏；再点一次（或点关闭）收起。
-  const showDu = async (side: Side) => {
-    if (du && du.side === side) {
-      setDu(null)
-      return
-    }
+  const showDu = async (side: Side, scope: PaneScope) => {
+    if (!paneRequests.current[side].current(scope)) return
+    const id = ++duRequest.current[side]
+    if (du && du.side === side && paneRequests.current[side].current(du.scope)) { setDu(null); return }
     const conn = side === 'left' ? leftConn : rightConn
     const path = side === 'left' ? leftPath : rightPath
     if (!conn) return
+    const current = () => id === duRequest.current[side] && paneRequests.current[side].current(scope)
     try {
-      const res = await invokeAs<{ totalBytes: number; availBytes: number }>('sftp.du', {
-        connectionId: conn.connectionId, path,
-      })
-      setDu({ side, text: `${path}: ${fmtBytes(res.totalBytes - res.availBytes)} / ${fmtBytes(res.totalBytes)}` })
+      const res = await invokeAs<{ totalBytes: number; availBytes: number }>('sftp.du', { connectionId: conn.connectionId, path })
+      if (current()) setDu({ side, scope, text: `${path}: ${fmtBytes(res.totalBytes - res.availBytes)} / ${fmtBytes(res.totalBytes)}` })
     } catch (e) {
-      setDu({ side, text: describeError(e) })
+      if (current()) setDu({ side, scope, text: describeError(e) })
     }
   }
 
@@ -551,10 +585,14 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
     const profileId = side === 'left' ? leftProfileId : rightProfileId
     const conn = side === 'left' ? leftConn : rightConn
     const path = side === 'left' ? leftPath : rightPath
-    const entries = side === 'left' ? leftEntries : rightEntries
-    const sel = side === 'left' ? leftSel : rightSel
+    const requests = paneRequests.current[side]
+    const scope = requests.capture()
+    const sourceScope = entryScopes.current[side]
+    const validSource = requests.source(sourceScope)
+    const entries = validSource ? (side === 'left' ? leftEntries : rightEntries) : []
+    const sel = validSource ? (side === 'left' ? leftSel : rightSel) : null
     const nav = side === 'left' ? leftNav : rightNav
-    const more = side === 'left' ? leftMore : rightMore
+    const more = validSource && (side === 'left' ? leftMore : rightMore)
     const offset = side === 'left' ? leftOffset : rightOffset
     const editing = side === 'left' ? editLeftPath : editRightPath
     const isLocal = kind === 'local'
@@ -582,6 +620,7 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
               style={{ flex: 1, minWidth: 130, maxWidth: 210 }}
               options={profileOptions}
               onChange={v => {
+                paneRequests.current[side].invalidate()
                 if (side === 'left') {
                   setLeftProfileId(v)
                   setLeftPath('')
@@ -595,22 +634,28 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
                   setRightSel(null)
                   rightNav.reset()
                 }
+                void ensureConn(v)
               }}
               loading={!!profileId && busyProfile === profileId}
               status={peerSame ? 'error' : undefined}
             />
           )}
+          {!isLocal && !conn && (
+            <Button size="small" aria-label={t('conn.connect')} loading={!!profileId && busyProfile === profileId} disabled={!profileId} onClick={() => void ensureConn(profileId)}>
+              {t('conn.connect')}
+            </Button>
+          )}
           <span className="pane-head-spacer" />
           {isLocal ? (
             <Button size="small" type="primary" ghost icon={<ArrowUpOutlined />}
               disabled={!(side === 'left' ? rightConn : leftConn)}
-              onClick={() => uploadFromPicker(side)}>
+              onClick={() => uploadFromPicker(side, sourceScope)}>
               {t('sftp.upload')}
             </Button>
           ) : (
             <Button size="small" type="primary" ghost icon={<SwapOutlined />}
               disabled={isLocal ? !(side === 'left' ? rightConn : leftConn) : !conn}
-              onClick={() => sendToPeer(side)}>
+              onClick={() => sendToPeer(side, sourceScope)}>
               {t('sftp.sendToPeer')}
             </Button>
           )}
@@ -624,23 +669,23 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
             <Button size="small" icon={<RollbackOutlined />} title={t('sftp.parent')}
               onClick={() => openSide(side, isLocal ? parentLocal(path) : parentRemote(path))} />
             <Button size="small" icon={<ReloadOutlined />} title={t('sftp.refresh')}
-              onClick={() => loadSide(side, path, 0)} />
+              onClick={() => { if (requests.matches([kind, profileId, conn?.connectionId ?? '', path])) void loadSide(side, path, 0) }} />
             {!isLocal && (
               <>
                 <Button size="small" icon={<FolderAddOutlined />} title={t('sftp.mkdir')}
                   onClick={async () => {
                     const name = await simplePrompt(t('sftp.mkdir'))
-                    if (name) await remoteAction(side, 'sftp.mkdir', { path: joinRemote(path, name) })
+                    if (name) await remoteAction(side, 'sftp.mkdir', { path: joinRemote(path, name) }, scope)
                   }} />
                 <Button size="small" icon={<DeleteOutlined />} title={t('sftp.remove')} danger
                   disabled={!sel}
                   onClick={async () => {
-                    if (!sel) return
-                    if (sel.isDir) await remoteAction(side, 'sftp.removeRecursive', { path: sel.path })
-                    else await remoteAction(side, 'sftp.remove', { path: sel.path })
+                    if (!sel || !requests.source(sourceScope)) return
+                    if (sel.isDir) await remoteAction(side, 'sftp.removeRecursive', { path: sel.path }, sourceScope)
+                    else await remoteAction(side, 'sftp.remove', { path: sel.path }, sourceScope)
                   }} />
                 <Button size="small" icon={<DashboardOutlined />} title={t('sftp.du')}
-                  onClick={() => showDu(side)} disabled={!conn} />
+                  onClick={() => showDu(side, scope)} disabled={!conn} />
               </>
             )}
           </Space>
@@ -649,12 +694,15 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
           <Input
             size="small"
             autoFocus
-            value={path}
-            onChange={e => {
-              if (side === 'left') setLeftPath(e.target.value)
-              else setRightPath(e.target.value)
+            value={pathDraft[side]}
+            onChange={e => setPathDraft(current => ({ ...current, [side]: e.target.value }))}
+            onPressEnter={() => openSide(side, pathDraft[side])}
+            onKeyDown={event => {
+              if (event.key !== 'Escape') return
+              event.preventDefault()
+              if (side === 'left') setEditLeftPath(false)
+              else setEditRightPath(false)
             }}
-            onPressEnter={() => openSide(side, path)}
             onBlur={() => {
               if (side === 'left') setEditLeftPath(false)
               else setEditRightPath(false)
@@ -682,16 +730,18 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
               className="path-edit"
               title={t('sftp.editPath')}
               onClick={() => {
+                // 编辑草稿不参与目录身份，只有 Enter 才提交并加载新路径。
+                setPathDraft(current => ({ ...current, [side]: path || (isLocal ? '' : '.') }))
                 if (side === 'left') setEditLeftPath(true)
                 else setEditRightPath(true)
               }}
             />
           </div>
         )}
-        {du && du.side === side && (
+        {du && du.side === side && requests.current(du.scope) && (
           <div className="fs-du">
             <span>{du.text}</span>
-            <CloseOutlined className="fs-du-close" onClick={() => setDu(null)} />
+            <CloseOutlined className="fs-du-close" onClick={() => { duRequest.current[side]++; setDu(null) }} />
           </div>
         )}
         <div className="fs-scroll">
@@ -703,12 +753,14 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
               <List.Item
                 className={`fs-item ${sel?.path === e.path ? 'fs-selected' : ''}`}
                 onClick={() => {
+                  if (!requests.source(sourceScope)) return
                   if (side === 'left') setLeftSel(e)
                   else setRightSel(e)
                 }}
                 onDoubleClick={() => {
+                  if (!requests.source(sourceScope)) return
                   if (e.isDir) openSide(side, e.path)
-                  else if (!isLocal) void doPreview(e, side)
+                  else if (!isLocal) void doPreview(e, side, sourceScope)
                 }}
               >
                 <span className="fs-icon">{e.isDir ? '📁' : e.isLink ? '🔗' : '📄'}</span>
@@ -718,7 +770,7 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
             )}
             footer={
               more ? (
-                <Button size="small" type="link" onClick={() => loadSide(side, path, offset + 500)}>more…</Button>
+                <Button size="small" type="link" onClick={() => { if (requests.source(sourceScope)) void loadSide(side, path, offset + 500) }}>more…</Button>
               ) : undefined
             }
           />
@@ -785,8 +837,8 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
 
       <Modal
         title={`${t('sftp.preview')}: ${preview?.path ?? ''}`}
-        open={preview !== null}
-        onCancel={() => setPreview(null)}
+        open={preview !== null && paneRequests.current[preview.side].source(preview.scope)}
+        onCancel={() => { previewRequest.current++; setPreview(null) }}
         onOk={savePreview}
         okText={t('sftp.saveFile')}
         okButtonProps={{ disabled: !!preview?.truncated }}
