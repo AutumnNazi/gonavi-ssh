@@ -1,4 +1,4 @@
-# GoNavi SSH（gonavi-plugin-ssh）
+# GoNavi SSH（gh-autumnnazi.ssh）
 
 [GoNavi](https://github.com/Syngnat/GoNavi) 的 SSH 运维插件：加密连接档案、交互式 PTY 终端、
 SFTP 双栏文件管理、后台任务与 Agent 工具。主机密钥 TOFU；支持 ProxyJump（≤3 跳）、
@@ -55,7 +55,7 @@ node --test scripts/package.test.mjs           # 打包行为回归（临时目�
 bash scripts/package.sh                       # 组包 → dist/*.zip
 ```
 
-组包默认读取 `gonavi.plugin.json` 的 `version`，v0.1.1 输出为 `dist/gonavi-ssh-v0.1.1.zip`；显式传入版本（如 `bash scripts/package.sh 0.1.1`）必须与清单一致，否则在构建与修改产物前停止。组包直接用现有 Node 执行本地 TypeScript 类型检查与 Vite 构建，失败即停止，不调用 npm 包装器，也不安装依赖。ZIP 仅包含 `bin/`、`frontend/` 和 `gonavi.plugin.json`，条目不带 `./`；重打时清除旧归档，避免残留资源。最终验收应对该 ZIP 运行宿主 `inspect`，不能只检查 `package/` 目录。
+组包默认读取 `gonavi.plugin.json` 的 `id` 与 `version`，v0.1.1 输出为 `dist/gh-autumnnazi.ssh-0.1.1.zip`；显式传入版本（如 `bash scripts/package.sh 0.1.1`）必须与清单一致，否则在构建与修改产物前停止。组包直接用现有 Node 执行本地 TypeScript 类型检查与 Vite 构建，失败即停止，不调用 npm 包装器，也不安装依赖。ZIP 仅包含 `bin/`、`frontend/` 和 `gonavi.plugin.json`，条目不带 `./`；重打时清除旧归档，避免残留资源。最终验收应对该 ZIP 运行宿主 `inspect`，不能只检查 `package/` 目录。
 
 设置 `GONAVI_HOST_ROOT` 为 GoNavi 源码目录后，上述测试会通过临时 Go overlay 调用真实 `InspectPackage`，验证旧 `./` 归档被拒绝、新归档与目录 digest 一致；不修改宿主源码，也不安装插件。可用 `GO_BIN`、`BASH_BIN` 指定已有工具的路径。
 
@@ -66,12 +66,18 @@ bash scripts/package.sh                       # 组包 → dist/*.zip
 
 ```sh
 gonavi plugin --root ./devroot check package/
-gonavi plugin --root ./devroot inspect dist/gonavi-ssh-v0.1.1.zip  # 拿最终 ZIP 的 digest
-gonavi plugin --root ./devroot install --digest <digest> --trust dist/gonavi-ssh-v0.1.1.zip
-gonavi plugin --root ./devroot enable autumnnazi.ssh
+gonavi plugin --root ./devroot inspect dist/gh-autumnnazi.ssh-0.1.1.zip  # 拿最终 ZIP 的 digest
+gonavi plugin --root ./devroot install --digest <digest> --trust dist/gh-autumnnazi.ssh-0.1.1.zip
+gonavi plugin --root ./devroot enable gh-autumnnazi.ssh
 ```
 
-或在 GoNavi 桌面端「设置中心 → 插件 → 本地安装」选择 `dist/gonavi-ssh-v0.1.1.zip`（开发验证也可选择 `package/` 目录）。
+或在 GoNavi 桌面端「设置中心 → 插件 → 本地安装」选择 `dist/gh-autumnnazi.ssh-0.1.1.zip`（开发验证也可选择 `package/` 目录）。
+
+## v0.1.1 命名修正重发（发布前说明）
+
+本次拟重发 v0.1.1：插件 ID 为 `gh-autumnnazi.ssh`，安装包为 `gh-autumnnazi.ssh-0.1.1.zip`，使用 `<插件 ID>-<版本>.zip`，与 Log2SQL 命名格式一致。旧 v0.1.1 曾使用 `autumnnazi.ssh`；待新包验收通过后，将删除其旧 Release、资产及标签，创建指向新提交的 v0.1.1 标签并以新包重新发布。v0.1.0 的 Release、资产和标签保持不变，不覆盖。
+
+宿主将新 ID 视为独立插件，不是旧插件的原位升级，宿主分配的数据目录也不同；现有连接档案和配置不会自动迁移。安装新 ID 前请保留旧实例及其数据，不要直接删除；本次不修改已安装插件，也不自动迁移数据。
 
 ## v0.1.1 发布说明
 

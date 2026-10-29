@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # 组装可安装的插件包：三平台后端二进制 + 前端产物 + 清单 → package/ 目录，
-# 再压缩为 dist/gonavi-ssh-v<version>.zip（GoNavi 支持目录 / ZIP / TGZ 安装）。
+# 再压缩为 dist/<plugin-id>-<version>.zip（GoNavi 支持目录 / ZIP / TGZ 安装）。
 # 注意：清单声明了三个平台条目，宿主要求包内全部条目文件都存在。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MANIFEST_ID="$(node -p "require(process.argv[1]).id" "$ROOT/gonavi.plugin.json")"
 MANIFEST_VERSION="$(node -p "require(process.argv[1]).version" "$ROOT/gonavi.plugin.json")"
 VERSION="${1-$MANIFEST_VERSION}"
 if [ "$VERSION" != "$MANIFEST_VERSION" ]; then
@@ -12,7 +13,7 @@ if [ "$VERSION" != "$MANIFEST_VERSION" ]; then
   exit 1
 fi
 STAGE="$ROOT/package"
-OUT="$ROOT/dist/gonavi-ssh-v$VERSION.zip"
+OUT="$ROOT/dist/$MANIFEST_ID-$VERSION.zip"
 
 cd "$ROOT"
 

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "apiVersion": 1,
-  "id": "autumnnazi.ssh",
+  "id": "gh-autumnnazi.ssh",
   "name": "GoNavi SSH",
   "version": "0.1.1",
   "minHostVersion": "1.2.0",

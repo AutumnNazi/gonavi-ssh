@@ -39,8 +39,8 @@ function fixture(t, extraEnv = {}) {
   fs.writeFileSync(path.join(dir, "frontend/node_modules/vite/bin/vite.js"), "const fs = require(\"node:fs\"); fs.appendFileSync(\"../build.trace\", \"vite\\n\"); process.exitCode = Number(process.env.FAIL_VITE || 0); if (process.exitCode) process.exit(process.exitCode); fs.mkdirSync(\"dist\", {recursive:true}); fs.writeFileSync(\"dist/index.html\", \"fresh frontend\");");
   const env = { ...process.env, ...extraEnv, PATH: path.join(dir, 'tools') + path.delimiter + process.env.PATH };
   const build = (...versions) => run(bash, ['scripts/package.sh', ...versions], dir, env, path.join(dir, 'build.log'));
-  const version = JSON.parse(fs.readFileSync(path.join(dir, 'gonavi.plugin.json'), 'utf8')).version;
-  const zip = path.join(dir, 'dist/gonavi-ssh-v' + version + '.zip');
+  const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'gonavi.plugin.json'), 'utf8'));
+  const zip = path.join(dir, 'dist', manifest.id + '-' + manifest.version + '.zip');
   return { dir, env, build, zip };
 }
 
@@ -53,13 +53,16 @@ test('default and matching explicit archive versions follow the manifest', t => 
   }
   const f = fixture(t);
   const manifest = JSON.parse(fs.readFileSync(path.join(f.dir, 'gonavi.plugin.json'), 'utf8'));
+  manifest.id = 'gh-fixture.ssh';
   manifest.version = '1.2.3';
   fs.writeFileSync(path.join(f.dir, 'gonavi.plugin.json'), JSON.stringify(manifest));
   for (const versions of [[], [manifest.version]]) {
     const result = f.build(...versions);
     assert.equal(result.status, 0, result.output);
-    assert.ok(fs.existsSync(path.join(f.dir, 'dist/gonavi-ssh-v1.2.3.zip')), 'archive must use manifest version 1.2.3');
-    assert.equal(JSON.parse(fs.readFileSync(path.join(f.dir, 'package/gonavi.plugin.json'), 'utf8')).version, '1.2.3');
+    assert.ok(fs.existsSync(path.join(f.dir, 'dist', 'gh-fixture.ssh-1.2.3.zip')), 'archive must use manifest ID and version');
+    const packaged = JSON.parse(fs.readFileSync(path.join(f.dir, 'package/gonavi.plugin.json'), 'utf8'));
+    assert.equal(packaged.id, 'gh-fixture.ssh');
+    assert.equal(packaged.version, '1.2.3');
   }
 });
 
@@ -76,13 +79,16 @@ test('mismatched explicit version fails before modifying package outputs', t => 
     assert.match(result.output, /版本.*不一致/);
     assert.equal(fs.readFileSync(marker, 'utf8'), 'keep staging');
     assert.equal(fs.readFileSync(f.zip, 'utf8'), 'keep archive');
-    assert.equal(fs.existsSync(path.join(f.dir, 'dist/gonavi-ssh-v' + version + '.zip')), false);
+    const id = JSON.parse(fs.readFileSync(path.join(f.dir, 'gonavi.plugin.json'), 'utf8')).id;
+    assert.equal(fs.existsSync(path.join(f.dir, 'dist', id + '-' + version + '.zip')), false);
     assert.equal(fs.existsSync(path.join(f.dir, 'build.trace')), false);
   }
 });
 
 test('archive has canonical root entries and all manifest declarations', t => {
-  assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'gonavi.plugin.json'), 'utf8')).minHostVersion, '1.2.0');
+  const sourceManifest = JSON.parse(fs.readFileSync(path.join(root, 'gonavi.plugin.json'), 'utf8'));
+  assert.equal(sourceManifest.id, 'gh-autumnnazi.ssh');
+  assert.equal(sourceManifest.minHostVersion, '1.2.0');
   const f = fixture(t);
   const result = f.build();
   assert.equal(result.status, 0, result.output);
@@ -102,7 +108,9 @@ test('archive has canonical root entries and all manifest declarations', t => {
   const extracted = run(tar, ['-xf', f.zip, '-C', unpack], f.dir, f.env, path.join(f.dir, 'extract.log'));
   assert.equal(extracted.status, 0, extracted.output);
   assert.equal(hash(path.join(unpack, 'frontend/index.html')), hash(path.join(f.dir, 'frontend/dist/index.html')));
-  assert.equal(JSON.parse(fs.readFileSync(path.join(unpack, 'gonavi.plugin.json'), 'utf8')).minHostVersion, '1.2.0');
+  const unpackedManifest = JSON.parse(fs.readFileSync(path.join(unpack, 'gonavi.plugin.json'), 'utf8'));
+  assert.equal(unpackedManifest.id, 'gh-autumnnazi.ssh');
+  assert.equal(unpackedManifest.minHostVersion, '1.2.0');
 });
 
 test("frontend build bypasses npm wrappers that report success without output", t => {
@@ -152,6 +160,7 @@ test("GoNavi InspectPackage rejects legacy paths and accepts the script archive"
     'if _, err := InspectPackage(context.Background(), ' + JSON.stringify(legacy) + '); err == nil || !strings.Contains(err.Error(), "unsafe package path") { t.Fatalf("legacy archive must reject: %v", err) } else { t.Logf("legacy rejected: %v", err) }',
     'dir, err := InspectPackage(context.Background(), ' + JSON.stringify(path.join(f.dir, 'package')) + '); if err != nil { t.Fatal(err) }',
     'zip, err := InspectPackage(context.Background(), ' + JSON.stringify(f.zip) + '); if err != nil { t.Fatal(err) }',
+    'if dir.Manifest.ID != "gh-autumnnazi.ssh" || zip.Manifest.ID != "gh-autumnnazi.ssh" { t.Fatalf("plugin ID was lost: dir=%q zip=%q", dir.Manifest.ID, zip.Manifest.ID) }',
     'if dir.Manifest.MinHostVersion != "1.2.0" || zip.Manifest.MinHostVersion != "1.2.0" { t.Fatalf("minimum host version was lost: dir=%q zip=%q", dir.Manifest.MinHostVersion, zip.Manifest.MinHostVersion) }',
     'if dir.Digest != zip.Digest { t.Fatalf("archive content differs: %s != %s", dir.Digest, zip.Digest) }; t.Logf("script ZIP accepted: id=%s version=%s minHostVersion=%s digest=%s", zip.Manifest.ID, zip.Manifest.Version, zip.Manifest.MinHostVersion, zip.Digest)',
     "}",
