@@ -45,10 +45,11 @@ function fixture(t, extraEnv = {}) {
 }
 
 test('default and matching explicit archive versions follow the manifest', t => {
-  for (const file of ['gonavi.plugin.json', 'frontend/package.json', 'frontend/package-lock.json']) {
+  const version = JSON.parse(fs.readFileSync(path.join(root, 'gonavi.plugin.json'), 'utf8')).version;
+  for (const file of ['frontend/package.json', 'frontend/package-lock.json']) {
     const metadata = JSON.parse(fs.readFileSync(path.join(root, file), 'utf8'));
-    assert.equal(metadata.version, '0.1.0', file);
-    if (metadata.packages) assert.equal(metadata.packages[''].version, '0.1.0', file + ' root package');
+    assert.equal(metadata.version, version, file);
+    if (metadata.packages) assert.equal(metadata.packages[''].version, version, file + ' root package');
   }
   const f = fixture(t);
   const manifest = JSON.parse(fs.readFileSync(path.join(f.dir, 'gonavi.plugin.json'), 'utf8'));
@@ -81,6 +82,7 @@ test('mismatched explicit version fails before modifying package outputs', t => 
 });
 
 test('archive has canonical root entries and all manifest declarations', t => {
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'gonavi.plugin.json'), 'utf8')).minHostVersion, '1.2.0');
   const f = fixture(t);
   const result = f.build();
   assert.equal(result.status, 0, result.output);
@@ -100,6 +102,7 @@ test('archive has canonical root entries and all manifest declarations', t => {
   const extracted = run(tar, ['-xf', f.zip, '-C', unpack], f.dir, f.env, path.join(f.dir, 'extract.log'));
   assert.equal(extracted.status, 0, extracted.output);
   assert.equal(hash(path.join(unpack, 'frontend/index.html')), hash(path.join(f.dir, 'frontend/dist/index.html')));
+  assert.equal(JSON.parse(fs.readFileSync(path.join(unpack, 'gonavi.plugin.json'), 'utf8')).minHostVersion, '1.2.0');
 });
 
 test("frontend build bypasses npm wrappers that report success without output", t => {
@@ -149,7 +152,8 @@ test("GoNavi InspectPackage rejects legacy paths and accepts the script archive"
     'if _, err := InspectPackage(context.Background(), ' + JSON.stringify(legacy) + '); err == nil || !strings.Contains(err.Error(), "unsafe package path") { t.Fatalf("legacy archive must reject: %v", err) } else { t.Logf("legacy rejected: %v", err) }',
     'dir, err := InspectPackage(context.Background(), ' + JSON.stringify(path.join(f.dir, 'package')) + '); if err != nil { t.Fatal(err) }',
     'zip, err := InspectPackage(context.Background(), ' + JSON.stringify(f.zip) + '); if err != nil { t.Fatal(err) }',
-    'if dir.Digest != zip.Digest { t.Fatalf("archive content differs: %s != %s", dir.Digest, zip.Digest) }; t.Logf("script ZIP accepted: id=%s version=%s digest=%s", zip.Manifest.ID, zip.Manifest.Version, zip.Digest)',
+    'if dir.Manifest.MinHostVersion != "1.2.0" || zip.Manifest.MinHostVersion != "1.2.0" { t.Fatalf("minimum host version was lost: dir=%q zip=%q", dir.Manifest.MinHostVersion, zip.Manifest.MinHostVersion) }',
+    'if dir.Digest != zip.Digest { t.Fatalf("archive content differs: %s != %s", dir.Digest, zip.Digest) }; t.Logf("script ZIP accepted: id=%s version=%s minHostVersion=%s digest=%s", zip.Manifest.ID, zip.Manifest.Version, zip.Manifest.MinHostVersion, zip.Digest)',
     "}",
   ].join('\n');
   const goTest = path.join(f.dir, "inspect_test.go");

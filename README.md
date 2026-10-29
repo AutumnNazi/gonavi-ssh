@@ -55,7 +55,7 @@ node --test scripts/package.test.mjs           # 打包行为回归（临时目�
 bash scripts/package.sh                       # 组包 → dist/*.zip
 ```
 
-组包默认读取 `gonavi.plugin.json` 的 `version`，v0.1.0 输出为 `dist/gonavi-ssh-v0.1.0.zip`；显式传入版本（如 `bash scripts/package.sh 0.1.0`）必须与清单一致，否则在构建与修改产物前停止。组包直接用现有 Node 执行本地 TypeScript 类型检查与 Vite 构建，失败即停止，不调用 npm 包装器，也不安装依赖。ZIP 仅包含 `bin/`、`frontend/` 和 `gonavi.plugin.json`，条目不带 `./`；重打时清除旧归档，避免残留资源。最终验收应对该 ZIP 运行宿主 `inspect`，不能只检查 `package/` 目录。
+组包默认读取 `gonavi.plugin.json` 的 `version`，v0.1.1 输出为 `dist/gonavi-ssh-v0.1.1.zip`；显式传入版本（如 `bash scripts/package.sh 0.1.1`）必须与清单一致，否则在构建与修改产物前停止。组包直接用现有 Node 执行本地 TypeScript 类型检查与 Vite 构建，失败即停止，不调用 npm 包装器，也不安装依赖。ZIP 仅包含 `bin/`、`frontend/` 和 `gonavi.plugin.json`，条目不带 `./`；重打时清除旧归档，避免残留资源。最终验收应对该 ZIP 运行宿主 `inspect`，不能只检查 `package/` 目录。
 
 设置 `GONAVI_HOST_ROOT` 为 GoNavi 源码目录后，上述测试会通过临时 Go overlay 调用真实 `InspectPackage`，验证旧 `./` 归档被拒绝、新归档与目录 digest 一致；不修改宿主源码，也不安装插件。可用 `GO_BIN`、`BASH_BIN` 指定已有工具的路径。
 
@@ -66,17 +66,18 @@ bash scripts/package.sh                       # 组包 → dist/*.zip
 
 ```sh
 gonavi plugin --root ./devroot check package/
-gonavi plugin --root ./devroot inspect dist/gonavi-ssh-v0.1.0.zip  # 拿最终 ZIP 的 digest
-gonavi plugin --root ./devroot install --digest <digest> --trust dist/gonavi-ssh-v0.1.0.zip
+gonavi plugin --root ./devroot inspect dist/gonavi-ssh-v0.1.1.zip  # 拿最终 ZIP 的 digest
+gonavi plugin --root ./devroot install --digest <digest> --trust dist/gonavi-ssh-v0.1.1.zip
 gonavi plugin --root ./devroot enable autumnnazi.ssh
 ```
 
-或在 GoNavi 桌面端「设置中心 → 插件 → 本地安装」选择 `dist/gonavi-ssh-v0.1.0.zip`（开发验证也可选择 `package/` 目录）。
+或在 GoNavi 桌面端「设置中心 → 插件 → 本地安装」选择 `dist/gonavi-ssh-v0.1.1.zip`（开发验证也可选择 `package/` 目录）。
 
-## v0.1.0 发布说明
+## v0.1.1 发布说明
 
-- 首个正式版本；安装包包含 Windows/amd64、Linux/amd64、macOS/arm64 后端与离线前端资源，包名与清单版本一致。
-- 宿主兼容：实时主题同步需要包含 `PluginUpdateWindowPreferences` 接口及窗口偏好通道的新版 GoNavi；旧宿主仍可使用原窗口通道，但不支持主题热更新。更新 SSH 插件不会升级 GoNavi 主程序，宿主需由用户另行升级。
+- 本版补齐清单中的 `minHostVersion: "1.2.0"`，本次安装包最低要求 **GoNavi 1.2.0**（与 Log2SQL v0.1.3 一致）。已发布的 v0.1.0 安装包未声明此字段；其 Release 和资产保持不变，不覆盖旧发布。
+- 安装包继续包含 Windows/amd64、Linux/amd64、macOS/arm64 后端与离线前端资源，包名与清单版本同步为 0.1.1。
+- 宿主兼容：实时主题同步还需使用包含 `PluginUpdateWindowPreferences` 接口及窗口偏好通道的宿主构建；版本号达到门槛并不代表已包含这些改动。低于最低版本的正式发布宿主会阻止插件运行；开发测试构建按宿主版本规则例外。更新 SSH 插件不会升级 GoNavi 主程序，宿主需由用户另行升级。
 
 ## Agent 工具（ai.tools）
 
