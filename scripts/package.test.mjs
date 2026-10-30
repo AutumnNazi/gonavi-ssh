@@ -26,17 +26,18 @@ function run(command, args, cwd, env, log) {
 function fixture(t, extraEnv = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gonavi package test '));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  for (const sub of ['scripts', 'tools', 'frontend/dist', 'frontend/node_modules/typescript/bin', 'frontend/node_modules/vite/bin']) {
+  for (const sub of ['scripts', 'tools', 'frontend/dist', 'frontend/public', 'frontend/node_modules/typescript/bin', 'frontend/node_modules/vite/bin']) {
     fs.mkdirSync(path.join(dir, sub), { recursive: true });
   }
   fs.copyFileSync(path.join(root, 'scripts/package.sh'), path.join(dir, 'scripts/package.sh'));
   fs.copyFileSync(path.join(root, 'gonavi.plugin.json'), path.join(dir, 'gonavi.plugin.json'));
+  fs.copyFileSync(path.join(root, 'frontend/public/icon.png'), path.join(dir, 'frontend/public/icon.png'));
   fs.writeFileSync(path.join(dir, 'frontend/dist/index.html'), 'stale frontend');
   fs.utimesSync(path.join(dir, 'frontend/dist/index.html'), 1, 1);
   fs.writeFileSync(path.join(dir, "tools/go"), "#!/usr/bin/env bash\nwhile [ \"$#\" -gt 0 ]; do if [ \"$1\" = \"-o\" ]; then shift; printf \"test backend\" > \"$1\"; exit 0; fi; shift; done\nexit 2\n", { mode: 0o755 });
   fs.writeFileSync(path.join(dir, "tools/npm"), "#!/usr/bin/env bash\nnode node_modules/typescript/bin/tsc --noEmit && node node_modules/vite/bin/vite.js build\n", { mode: 0o755 });
   fs.writeFileSync(path.join(dir, "frontend/node_modules/typescript/bin/tsc"), "const fs = require(\"node:fs\"); fs.appendFileSync(\"../build.trace\", \"tsc\\n\"); process.exit(Number(process.env.FAIL_TYPECHECK || 0));");
-  fs.writeFileSync(path.join(dir, "frontend/node_modules/vite/bin/vite.js"), "const fs = require(\"node:fs\"); fs.appendFileSync(\"../build.trace\", \"vite\\n\"); process.exitCode = Number(process.env.FAIL_VITE || 0); if (process.exitCode) process.exit(process.exitCode); fs.mkdirSync(\"dist\", {recursive:true}); fs.writeFileSync(\"dist/index.html\", \"fresh frontend\");");
+  fs.writeFileSync(path.join(dir, "frontend/node_modules/vite/bin/vite.js"), "const fs = require(\"node:fs\"); fs.appendFileSync(\"../build.trace\", \"vite\\n\"); process.exitCode = Number(process.env.FAIL_VITE || 0); if (process.exitCode) process.exit(process.exitCode); fs.mkdirSync(\"dist\", {recursive:true}); fs.writeFileSync(\"dist/index.html\", \"fresh frontend\"); fs.cpSync(\"public\", \"dist\", {recursive:true});");
   const env = { ...process.env, ...extraEnv, PATH: path.join(dir, 'tools') + path.delimiter + process.env.PATH };
   const build = (...versions) => run(bash, ['scripts/package.sh', ...versions], dir, env, path.join(dir, 'build.log'));
   const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'gonavi.plugin.json'), 'utf8'));
@@ -64,6 +65,29 @@ test('default and matching explicit archive versions follow the manifest', t => 
     assert.equal(packaged.id, 'gh-fixture.ssh');
     assert.equal(packaged.version, '1.2.3');
   }
+});
+
+
+
+test('declares the selected terminal logo and packages its exact PNG bytes', t => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, 'gonavi.plugin.json'), 'utf8'));
+  assert.equal(manifest.icon, 'frontend/icon.png');
+  const source = path.join(root, 'frontend/public/icon.png');
+  const bytes = fs.readFileSync(source);
+  assert.equal(bytes.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+  assert.equal(bytes.readUInt32BE(16), 256);
+  assert.equal(bytes.readUInt32BE(20), 256);
+  assert.ok(bytes.length < 64 * 1024, 'logo must fit the host raster limit');
+  const f = fixture(t);
+  const built = f.build();
+  assert.equal(built.status, 0, built.output);
+  const unpack = path.join(f.dir, 'icon-unpack');
+  fs.mkdirSync(unpack);
+  const extracted = run(tar, ['-xf', f.zip, '-C', unpack], f.dir, f.env, path.join(f.dir, 'icon-unpack.log'));
+  assert.equal(extracted.status, 0, extracted.output);
+  const packaged = JSON.parse(fs.readFileSync(path.join(unpack, 'gonavi.plugin.json'), 'utf8'));
+  assert.equal(packaged.icon, manifest.icon);
+  assert.equal(hash(path.join(unpack, packaged.icon)), hash(source), 'icon pixels must not change while packaging');
 });
 
 test('mismatched explicit version fails before modifying package outputs', t => {
