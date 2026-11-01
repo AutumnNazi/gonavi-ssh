@@ -124,6 +124,14 @@
       { "id": "agent.triage", "title": "Quick health triage (disk pressure, dmesg errors)", "effect": "read",
         "inputSchema": { "type": "object", "required": ["connectionId"], "properties": { "connectionId": { "type": "string", "maxLength": 64 } } } }
     ],
+    "navigation": [
+      {
+        "id": "ssh.terminal",
+        "title": "SSH 终端",
+        "target": "window",
+        "location": "tools"
+      }
+    ],
     "panels": [
       {
         "id": "ssh-status",
