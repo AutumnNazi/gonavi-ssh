@@ -85,6 +85,12 @@ v0.1.2 将此图标纳入插件包，增强深浅主题下的辨识度。打包�
 - 使用同一张 256×256 透明 PNG，源文件 `frontend/public/icon.png` 随离线前端资源打包为 `frontend/icon.png`。
 - 打包回归校验图标尺寸、大小、清单路径与归档内 PNG 字节一致性。
 
+## v0.1.3 发布说明
+
+- 清单新增 `contributes.navigation`（`ssh.terminal`、`target: window`、`location: tools`）：宿主顶栏出现入口，点击直接打开独立的 SSH 窗口；插件管理详情页原有的「打开窗口」保持可用。
+- 只声明窗口目标，不声明 `pages`/`ui.pages`：终端 UI 与桥接数据面不变，安装包内容与 v0.1.2 一致，仅清单变化。
+- 宿主兼容：顶栏窗口入口需要支持 `navigation.target=window` 的宿主构建（GoNavi #1612）；更早的宿主在解析清单阶段就会因 `unknown manifest field: target` 拒绝安装。`minHostVersion` 仍为 `1.2.0`，因为拦住旧宿主的实际是清单字段解析而非版本门禁；开发测试构建按宿主版本规则例外。
+
 ## v0.1.1 命名修正重发记录
 
 v0.1.1 已重发：插件 ID 为 `gh-autumnnazi.ssh`，安装包为 `gh-autumnnazi.ssh-0.1.1.zip`，使用 `<插件 ID>-<版本>.zip`，与 Log2SQL 命名格式一致。旧 v0.1.1 曾使用 `autumnnazi.ssh`，现已以新 ID 的安装包重新发布。v0.1.0 的 Release、资产和标签保持不变，不覆盖。

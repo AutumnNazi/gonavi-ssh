@@ -3,7 +3,7 @@
   "apiVersion": 1,
   "id": "gh-autumnnazi.ssh",
   "name": "GoNavi SSH",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "minHostVersion": "1.2.0",
   "icon": "frontend/icon.png",
   "description": "SSH terminal, SFTP file manager and agent tools with TOFU host keys and encrypted profiles.",
