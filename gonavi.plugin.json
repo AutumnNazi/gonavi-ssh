@@ -3,16 +3,17 @@
   "apiVersion": 1,
   "id": "gh-autumnnazi.ssh",
   "name": "GoNavi SSH",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "minHostVersion": "1.2.0",
   "icon": "frontend/icon.png",
   "description": "SSH terminal, SFTP file manager and agent tools with TOFU host keys and encrypted profiles.",
   "author": "AutumnNazi",
   "license": "MIT",
-  "permissions": ["ai.tools", "host.log"],
+  "permissions": ["ai.tools", "host.log", "ui.html-panel"],
   "permissionNotes": {
     "ai.tools": "Exposes ssh/sftp/agent commands to the GoNavi Agent tool catalog; write commands respect the plugin read-only switch.",
-    "host.log": "Writes bounded startup and connection diagnostics."
+    "host.log": "Writes bounded startup and connection diagnostics.",
+    "ui.html-panel": "Runs the plugin window HTML/JS inside a sandboxed native view with no host bindings beyond the window bridge."
   },
   "backend": {
     "platforms": {

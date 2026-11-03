@@ -85,6 +85,12 @@ v0.1.2 将此图标纳入插件包，增强深浅主题下的辨识度。打包�
 - 使用同一张 256×256 透明 PNG，源文件 `frontend/public/icon.png` 随离线前端资源打包为 `frontend/icon.png`。
 - 打包回归校验图标尺寸、大小、清单路径与归档内 PNG 字节一致性。
 
+## v0.1.4 发布说明
+
+- 补齐 `ui.html-panel` 权限与说明：宿主自 GoNavi `00021c5bc`（dev，11-01）起要求声明 `window` 的插件显式持有该权限，否则清单在解码/校验阶段即被拒绝（`window requires the ui.html-panel permission`）。
+- 本版仅清单与版本号变更，终端、SFTP、Agent 逻辑及前端产物不变；未含该规则的宿主（如 v1.2.0 正式版）同样可安装。
+- 已发布的 v0.1.3 在含该规则的宿主上不可安装，请升级到 0.1.4。
+
 ## v0.1.3 发布说明
 
 - 清单新增 `contributes.navigation`（`ssh.terminal`、`target: window`、`location: tools`）：宿主顶栏出现入口，点击直接打开独立的 SSH 窗口；插件管理详情页原有的「打开窗口」保持可用。
