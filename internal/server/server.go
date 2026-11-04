@@ -78,10 +78,8 @@ func New(dataDir string) (*App, error) {
 
 // Shutdown 由 SDK OnClose 调用：非阻塞地关闭全部会话与连接。
 func (a *App) Shutdown() {
-	a.terms.CloseAll()
-	a.transfers.CloseAll()
-	a.sftp.CloseAll()
-	a.conns.CloseAll()
+	// 进程退出路径：不限时，等清理干净再走。
+	runTeardown(0, a.closeAllSessions()...)
 }
 
 // readOnly 查询当前是否只读模式。
@@ -123,6 +121,7 @@ func (a *App) Handlers() map[string]goplugin.Handler {
 		{"terminal.write", true, a.terminalWrite},
 		{"terminal.writeMulti", true, a.terminalWriteMulti},
 		{"terminal.read", false, a.terminalRead},
+		{"terminal.readMulti", false, a.terminalReadMulti},
 		{"terminal.resize", true, a.terminalResize},
 		{"terminal.close", false, a.terminalClose},
 		{"terminal.list", false, a.terminalList},
@@ -391,10 +390,9 @@ func (a *App) sessionTeardown(_ context.Context, raw json.RawMessage) (any, erro
 	if err := requireNoArgs(raw); err != nil {
 		return nil, err
 	}
-	a.terms.CloseAll()
-	a.transfers.CloseAll()
-	a.sftp.CloseAll()
-	a.conns.CloseAll()
+	// 并行 + 限时：宿主在本次调用返回前不允许重开插件窗口，串行等待每一次
+	// 关连接的网络收尾会把「关窗后马上重开」堵住。
+	runTeardown(teardownGrace, a.closeAllSessions()...)
 	return map[string]any{}, nil
 }
 
@@ -511,6 +509,47 @@ func (a *App) terminalRead(ctx context.Context, raw json.RawMessage) (any, error
 		resp["exitCode"] = exitCode
 	}
 	return resp, nil
+}
+
+// terminal.readMulti 批量长轮询：一次调用服务多个会话，任一会话有输出或
+// 已结束就返回。前端所有终端标签共用一条读取循环，不再各占一个宿主桥并发
+// 额度（上限 8），标签数量因此不再影响输入写入。
+func (a *App) terminalReadMulti(ctx context.Context, raw json.RawMessage) (any, error) {
+	var req struct {
+		SessionKeys []string `json:"sessionKeys"`
+		MaxBytes    int      `json:"maxBytes"`
+		WaitMillis  int      `json:"waitMillis"`
+	}
+	if err := decode(raw, &req); err != nil {
+		return nil, err
+	}
+	if len(req.SessionKeys) == 0 {
+		return nil, appErr(errBadArgument, "sessionKeys is required")
+	}
+	if req.WaitMillis < 0 {
+		req.WaitMillis = 0
+	}
+	if req.WaitMillis > maxWaitMillis {
+		req.WaitMillis = maxWaitMillis
+	}
+	events, err := a.terms.ReadMulti(ctx, req.SessionKeys, req.MaxBytes, time.Duration(req.WaitMillis)*time.Millisecond)
+	if err != nil {
+		return nil, appErr(errSession, err.Error())
+	}
+	out := make([]map[string]any, 0, len(events))
+	for _, ev := range events {
+		item := map[string]any{
+			"sessionKey": ev.SessionKey,
+			"dataBase64": base64.StdEncoding.EncodeToString(ev.Chunk),
+			"eof":        ev.EOF,
+			"hasExit":    ev.HasExit,
+		}
+		if ev.HasExit {
+			item["exitCode"] = ev.ExitCode
+		}
+		out = append(out, item)
+	}
+	return map[string]any{"events": out}, nil
 }
 
 func (a *App) terminalResize(_ context.Context, raw json.RawMessage) (any, error) {

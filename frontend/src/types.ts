@@ -66,7 +66,7 @@ export interface TransferStatus {
   localPath: string
   peerConnectionId?: string
   peerPath?: string
-  state: 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
+  state: 'queued' | 'running' | 'done' | 'failed' | 'cancelled' | 'interrupted'
   bytesDone: number
   totalBytes: number
   error?: string

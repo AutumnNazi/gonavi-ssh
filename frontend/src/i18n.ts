@@ -123,6 +123,14 @@ const zhCN: Dict = {
   'state.done': '完成',
   'state.failed': '失败',
   'state.cancelled': '已取消',
+  'state.interrupted': '已中断',
+  'sftp.interruptedHint': '关闭插件窗口中断了这次传输，任务已保留，可续传。',
+  'app.closeWindow': '关闭窗口',
+  'app.closeTitle': '有传输正在进行',
+  'app.closeBody': '有 {count} 个传输正在进行，关闭窗口会把它们记为已中断；重开窗口后可在文件页续传。',
+  'app.closeConfirm': '仍然关闭',
+  'app.closeStay': '继续传输',
+  'app.interruptedNotice': '有 {count} 个传输被中断且未完成，可在文件页续传。',
 }
 
 const zhTW: Dict = {
@@ -244,6 +252,14 @@ const zhTW: Dict = {
   'state.done': '完成',
   'state.failed': '失敗',
   'state.cancelled': '已取消',
+  'state.interrupted': '已中斷',
+  'sftp.interruptedHint': '關閉外掛視窗中斷了這次傳輸，工作已保留，可續傳。',
+  'app.closeWindow': '關閉視窗',
+  'app.closeTitle': '有傳輸正在進行',
+  'app.closeBody': '有 {count} 個傳輸正在進行，關閉視窗會將它們記為已中斷；重開視窗後可在檔案頁續傳。',
+  'app.closeConfirm': '仍然關閉',
+  'app.closeStay': '繼續傳輸',
+  'app.interruptedNotice': '有 {count} 個傳輸被中斷且未完成，可在檔案頁續傳。',
 }
 
 const en: Dict = {
@@ -365,6 +381,14 @@ const en: Dict = {
   'state.done': 'Done',
   'state.failed': 'Failed',
   'state.cancelled': 'Cancelled',
+  'state.interrupted': 'Interrupted',
+  'sftp.interruptedHint': 'Closing the plugin window interrupted this transfer; the task is kept and can be resumed.',
+  'app.closeWindow': 'Close window',
+  'app.closeTitle': 'Transfers in progress',
+  'app.closeBody': '{count} transfer(s) are still running. Closing the window marks them as interrupted; you can resume them from the Files tab after reopening.',
+  'app.closeConfirm': 'Close anyway',
+  'app.closeStay': 'Keep transferring',
+  'app.interruptedNotice': '{count} transfer(s) were interrupted and are not finished; resume them from the Files tab.',
 }
 
 const ja: Dict = {
@@ -486,6 +510,14 @@ const ja: Dict = {
   'state.done': '完了',
   'state.failed': '失敗',
   'state.cancelled': 'キャンセル済み',
+  'state.interrupted': '中断',
+  'sftp.interruptedHint': 'プラグインのウィンドウを閉じたためこの転送は中断されました。タスクは残っており再開できます。',
+  'app.closeWindow': 'ウィンドウを閉じる',
+  'app.closeTitle': '転送が進行中です',
+  'app.closeBody': '{count} 件の転送が進行中です。ウィンドウを閉じると中断として記録されます。開き直したあとファイルタブから再開できます。',
+  'app.closeConfirm': 'それでも閉じる',
+  'app.closeStay': '転送を続ける',
+  'app.interruptedNotice': '未完了のまま中断された転送が {count} 件あります。ファイルタブから再開できます。',
 }
 
 const de: Dict = {
@@ -607,6 +639,14 @@ const de: Dict = {
   'state.done': 'Fertig',
   'state.failed': 'Fehlgeschlagen',
   'state.cancelled': 'Abgebrochen',
+  'state.interrupted': 'Unterbrochen',
+  'sftp.interruptedHint': 'Das Schließen des Plugin-Fensters hat diese Übertragung unterbrochen; die Aufgabe bleibt erhalten und kann fortgesetzt werden.',
+  'app.closeWindow': 'Fenster schließen',
+  'app.closeTitle': 'Übertragungen laufen noch',
+  'app.closeBody': '{count} Übertragung(en) laufen noch. Beim Schließen werden sie als unterbrochen markiert; nach dem erneuten Öffnen können sie im Dateien-Tab fortgesetzt werden.',
+  'app.closeConfirm': 'Trotzdem schließen',
+  'app.closeStay': 'Weiter übertragen',
+  'app.interruptedNotice': '{count} Übertragung(en) wurden unterbrochen und sind unvollständig; im Dateien-Tab fortsetzbar.',
 }
 
 const ru: Dict = {
@@ -728,6 +768,14 @@ const ru: Dict = {
   'state.done': 'Готово',
   'state.failed': 'Ошибка',
   'state.cancelled': 'Отменено',
+  'state.interrupted': 'Прервано',
+  'sftp.interruptedHint': 'Закрытие окна плагина прервало эту передачу; задача сохранена и может быть продолжена.',
+  'app.closeWindow': 'Закрыть окно',
+  'app.closeTitle': 'Передачи выполняются',
+  'app.closeBody': 'Ещё выполняется передач: {count}. При закрытии окна они будут помечены как прерванные; после повторного открытия их можно продолжить на вкладке «Файлы».',
+  'app.closeConfirm': 'Всё равно закрыть',
+  'app.closeStay': 'Продолжить передачи',
+  'app.interruptedNotice': 'Прервано незавершённых передач: {count}. Продолжить можно на вкладке «Файлы».',
 }
 
 // 按宿主 locale 精确/前缀解析到字典：zh-TW 优先繁体，其余 zh* 落简体。

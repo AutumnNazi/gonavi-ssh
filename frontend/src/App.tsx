@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { App as AntApp, Layout, message, Modal, Tabs, Input } from 'antd'
+import { App as AntApp, Button, Layout, message, Modal, Tabs, Input } from 'antd'
 import {
   ProfilePanel,
   type ProfileView,
@@ -9,7 +9,13 @@ import { SftpPanel } from './components/SftpPanel'
 import { SettingsPanel } from './components/SettingsPanel'
 import { invokeAs, describeError } from './bridge'
 import { t } from './i18n'
-import type { Challenge, ConnectionInfo, PluginSettings, TerminalTab } from './types'
+import type {
+  Challenge,
+  ConnectionInfo,
+  PluginSettings,
+  TerminalTab,
+  TransferStatus,
+} from './types'
 
 const { Sider, Content } = Layout
 
@@ -60,6 +66,18 @@ export default function App() {
     }
   }, [])
 
+  // 关窗会让还没跑完的传输停在 interrupted，重开窗口时提示一次，
+  // 用户才知道要去文件页点续传，而不是以为传输失败要重来。
+  const notifyInterruptedTransfers = useCallback(async () => {
+    try {
+      const res = await invokeAs<{ tasks: TransferStatus[] }>('transfer.list', {})
+      const count = (res.tasks ?? []).filter(task => task.state === 'interrupted').length
+      if (count > 0) message.warning(t('app.interruptedNotice', { count }), 8)
+    } catch {
+      /* 提示失败不阻塞其他初始化 */
+    }
+  }, [])
+
   // 清理上一次窗口会话的残留连接（宿主在窗口关闭时也会触发 teardown，
   // 这里覆盖窗口进程异常退出等场景），随后加载当前状态。
   useEffect(() => {
@@ -71,9 +89,10 @@ export default function App() {
         refreshProfiles()
         refreshConnections()
         refreshSettings()
+        notifyInterruptedTransfers()
       })
     return () => { cancelled = true }
-  }, [refreshProfiles, refreshConnections, refreshSettings])
+  }, [refreshProfiles, refreshConnections, refreshSettings, notifyInterruptedTransfers])
 
   const openTerminalTab = useCallback(async (conn: ConnectionInfo, profile: ProfileView | null) => {
     try {
@@ -218,6 +237,36 @@ export default function App() {
     })
   }, [])
 
+  // 宿主窗口标题栏上的关闭按钮插件拦不到，这里给出窗口内的关闭入口：
+  // 还有传输在跑时先确认一次，避免用户以为关窗后传输还在继续。
+  const closeWindow = useCallback(() => {
+    window.gonaviPlugin?.close().catch(() => {})
+  }, [])
+
+  const requestClose = useCallback(async () => {
+    let running = 0
+    try {
+      const res = await invokeAs<{ tasks: TransferStatus[] }>('transfer.list', {})
+      running = (res.tasks ?? []).filter(
+        task => task.state === 'running' || task.state === 'queued',
+      ).length
+    } catch {
+      // 查不到传输状态就直接关：一次失败的状态查询不该把窗口扣住。
+    }
+    if (running === 0) {
+      closeWindow()
+      return
+    }
+    Modal.confirm({
+      title: t('app.closeTitle'),
+      content: t('app.closeBody', { count: running }),
+      okText: t('app.closeConfirm'),
+      okButtonProps: { danger: true },
+      cancelText: t('app.closeStay'),
+      onOk: () => closeWindow(),
+    })
+  }, [closeWindow])
+
   return (
     <AntApp style={{ height: '100%' }}>
       <Layout className="app-root">
@@ -235,6 +284,11 @@ export default function App() {
             className="main-tabs"
             activeKey={mainTab}
             onChange={setMainTab}
+            tabBarExtraContent={
+              <Button size="small" onClick={() => void requestClose()}>
+                {t('app.closeWindow')}
+              </Button>
+            }
             items={[
               {
                 key: 'terminals',

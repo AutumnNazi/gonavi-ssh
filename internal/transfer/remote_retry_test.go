@@ -47,7 +47,9 @@ func TestRetryRejectsActiveAndUnknownTasks(t *testing.T) {
 		task := &Task{ID: string(state), ConnectionID: conn.ID, Direction: ServerToServer, state: state}
 		manager.addTask(task)
 		before := len(manager.List())
-		if _, err := manager.Retry(task.ID, conn, nil); err == nil || !strings.Contains(err.Error(), "only failed or cancelled") {
+		// 状态清单已经在 transfer.Retryable 里统一，这里跟着断言新文案：
+		// interrupted 现在允许续传，被拒的只剩排队中/运行中/已完成。
+		if _, err := manager.Retry(task.ID, conn, nil); err == nil || !strings.Contains(err.Error(), "only failed, cancelled or interrupted") {
 			t.Errorf("state=%s error=%v", state, err)
 		}
 		if len(manager.List()) != before {

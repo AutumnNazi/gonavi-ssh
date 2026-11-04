@@ -823,7 +823,10 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
                       {t('sftp.cancelTransfer')}
                     </a>
                   )}
-                  {(tr.state === 'failed' || tr.state === 'cancelled') && (
+                  {tr.state === 'interrupted' && (
+                    <Tooltip title={t('sftp.interruptedHint')}><span className="transfer-err">!</span></Tooltip>
+                  )}
+                  {(tr.state === 'failed' || tr.state === 'cancelled' || tr.state === 'interrupted') && (
                     <a onClick={() => invokeAs('transfer.retry', { taskId: tr.id, connectionId: tr.connectionId }).catch(e => message.error(describeError(e)))}>
                       {t('sftp.retry')}
                     </a>

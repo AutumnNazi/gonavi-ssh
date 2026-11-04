@@ -39,6 +39,9 @@ const (
 	Done      State = "done"
 	Failed    State = "failed"
 	Cancelled State = "cancelled"
+	// Interrupted 是宿主关闭插件窗口时的清理中断：不是用户主动取消，
+	// 也不是传输本身出错，UI 要把它和「已取消」分开显示并给出续传入口。
+	Interrupted State = "interrupted"
 )
 
 // Task 是一次传输任务。
@@ -60,6 +63,17 @@ type Task struct {
 	startedAt  time.Time
 	endedAt    time.Time
 	cancel     context.CancelFunc
+	// interrupted 标记本次取消来自关窗清理（CloseAll），用于把收尾状态
+	// 记成 Interrupted 而不是 Cancelled。
+	interrupted bool
+}
+
+// cancelledState 返回取消收尾时应记的状态。调用方须持有 t.mu。
+func (t *Task) cancelledState() State {
+	if t.interrupted {
+		return Interrupted
+	}
+	return Cancelled
 }
 
 // Status 是任务对外快照。
@@ -228,7 +242,7 @@ func (m *Manager) runRemote(ctx context.Context, t *Task, srcConn, dstConn *sshc
 		t.mu.Lock()
 		t.endedAt = time.Now()
 		if errors.Is(err, context.Canceled) {
-			t.state = Cancelled
+			t.state = t.cancelledState()
 		} else {
 			t.state = Failed
 			t.err = err
@@ -316,7 +330,7 @@ func (m *Manager) run(ctx context.Context, t *Task, conn *sshclient.Conn) {
 	case err == nil:
 		t.state = Done
 	case errors.Is(err, context.Canceled):
-		t.state = Cancelled
+		t.state = t.cancelledState()
 	default:
 		t.state = Failed
 		t.err = err
@@ -614,7 +628,9 @@ func (m *Manager) Cancel(id string) error {
 	return nil
 }
 
-// CloseAll 取消全部运行中任务（进程退出前清理）。
+// CloseAll 取消全部运行中任务（关窗清理与进程退出前清理）。
+// 记 interrupted 而不是 cancelled：关窗造成的中断不是用户的取消动作，
+// 重开窗口后 UI 要能提示并一键续传（下载走 .part、上传重传）。
 func (m *Manager) CloseAll() {
 	m.mu.Lock()
 	tasks := make([]*Task, 0, len(m.tasks))
@@ -625,6 +641,9 @@ func (m *Manager) CloseAll() {
 	for _, t := range tasks {
 		t.mu.Lock()
 		st := t.state
+		if st == Running || st == Queued {
+			t.interrupted = true
+		}
 		t.mu.Unlock()
 		if st == Running || st == Queued {
 			t.cancel()
@@ -632,7 +651,13 @@ func (m *Manager) CloseAll() {
 	}
 }
 
-// Retry 重试一个失败/取消的任务（断点续传）。
+// Retryable 报告该状态的任务能否续传：失败、用户取消、关窗中断都可以，
+// 正在跑、排队中和已完成的都不行。路由层与任务层共用这个判据，避免两边各写一份状态清单后走偏。
+func Retryable(state State) bool {
+	return state == Failed || state == Cancelled || state == Interrupted
+}
+
+// Retry 重试一个失败/取消/被关窗中断的任务（断点续传）。
 func (m *Manager) Retry(id string, conn *sshclient.Conn, allowLocalPath func(string) bool, peer ...*sshclient.Conn) (string, error) {
 	m.mu.Lock()
 	old, ok := m.tasks[id]
@@ -641,8 +666,8 @@ func (m *Manager) Retry(id string, conn *sshclient.Conn, allowLocalPath func(str
 		return "", errors.New("task not found")
 	}
 	s := old.snapshot()
-	if s.State != Failed && s.State != Cancelled {
-		return "", fmt.Errorf("only failed or cancelled tasks can retry")
+	if !Retryable(s.State) {
+		return "", fmt.Errorf("only failed, cancelled or interrupted tasks can retry")
 	}
 	var nt *Task
 	var err error

@@ -431,8 +431,8 @@ func (a *App) retryTransfer(raw json.RawMessage, connection func(string) (*sshcl
 	if !ok {
 		return nil, appErr(errNotFound, "task not found")
 	}
-	if status.State != transfer.Failed && status.State != transfer.Cancelled {
-		return nil, appErr(errSession, "only failed or cancelled tasks can retry")
+	if !transfer.Retryable(status.State) {
+		return nil, appErr(errSession, "only failed, cancelled or interrupted tasks can retry")
 	}
 	conn, ok := connection(req.ConnectionID)
 	if !ok {

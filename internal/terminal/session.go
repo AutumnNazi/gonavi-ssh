@@ -40,6 +40,9 @@ type Session struct {
 	openedAt time.Time
 	cols     int
 	rows     int
+	// onChange 由 Manager 注入：有新输出或会话结束时唤醒批量读（terminal.readMulti）。
+	// 在锁外调用，只做一次非阻塞发信号。
+	onChange func()
 
 	// 命令行历史：从用户输入流里抽取可读行（跳过控制与转义序列）。
 	lineBuf      []byte
@@ -79,54 +82,75 @@ func (s *Session) pushHistoryLocked(line string) {
 	}
 }
 
+// frameSafeMax 单次返回给 UI 的原始字节上限：~700KiB base64 后约 933KiB，
+// 加 JSON 封装仍在宿主 1MiB 协议帧内。
+const frameSafeMax = 700 * 1024
+
+// defaultReadBytes 请求缺省或越界时的每会话字节数。
+const defaultReadBytes = 64 * 1024
+
 // Read 长轮询读取输出：有数据立刻返回 maxBytes 内的一段；无数据时最多等
 // wait；wait<=0 时不等待（缓冲空立即返回空）。ctx 取消（宿主
 // $/cancelRequest）时立即返回。eof=true 表示会话已结束且缓冲已取空。
-// maxBytes 上限按 base64 编码后不超协议帧预算（1MiB）反推。
 func (s *Session) Read(ctx context.Context, maxBytes int, wait time.Duration) (chunk []byte, eof bool, exitCode int, hasExit bool, err error) {
-	// ~700KiB 原始字节 base64 后约 933KiB，加 JSON 封装仍在 1MiB 帧内。
-	const frameSafeMax = 700 * 1024
-	if maxBytes <= 0 || maxBytes > frameSafeMax {
-		maxBytes = 64 * 1024
-	}
+	maxBytes = clampReadBytes(maxBytes)
 	deadline := time.Now().Add(wait)
 	for {
-		s.mu.Lock()
-		if len(s.buf) > 0 {
-			if len(s.buf) > maxBytes {
-				chunk, s.buf = s.buf[:maxBytes], s.buf[maxBytes:]
-			} else {
-				chunk, s.buf = s.buf, nil
-			}
-			s.mu.Unlock()
+		var changed <-chan struct{}
+		chunk, eof, exitCode, hasExit, changed = s.take(maxBytes)
+		if len(chunk) > 0 {
 			return chunk, false, 0, false, nil
 		}
-		if s.closed {
-			exitCode, hasExit := readExit(s.exitCode)
-			s.mu.Unlock()
+		if eof {
 			return nil, true, exitCode, hasExit, nil
 		}
-		changed := s.changed
-		s.mu.Unlock()
-
 		// 缓冲空且会话未结束：等待新数据 / 截止 / 取消。
-		var timer <-chan time.Time
-		if wait > 0 {
-			t := time.NewTimer(time.Until(deadline))
-			timer = t.C
-			defer t.Stop()
-		} else {
+		if wait <= 0 {
 			// 不等待：立即返回空，供调用方快速探测。
 			return nil, false, 0, false, nil
 		}
+		timer := time.NewTimer(time.Until(deadline))
 		select {
 		case <-changed:
+			// 有新数据或状态变化：回到取数再判一次。
 		case <-ctx.Done():
+			timer.Stop()
 			return nil, false, 0, false, ctx.Err()
-		case <-timer:
+		case <-timer.C:
+			// 等满 wait 仍无数据。这里必须返回：deadline 已过，
+			// 再循环只会拿到立即触发的定时器空转。
 			return nil, false, 0, false, nil
 		}
+		timer.Stop()
 	}
+}
+
+// take 非阻塞取走缓冲的一段或结束标记（缓冲空且未结束时三者皆空），
+// 并返回当前的变化信号供调用方悬挂等待。Read 与批量读共用它，保证
+// 「有数据先给数据、取空后才报 eof」的语义只有一处实现。
+func (s *Session) take(maxBytes int) (chunk []byte, eof bool, exitCode int, hasExit bool, changed <-chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.buf) > 0 {
+		if len(s.buf) > maxBytes {
+			chunk, s.buf = s.buf[:maxBytes], s.buf[maxBytes:]
+		} else {
+			chunk, s.buf = s.buf, nil
+		}
+		return chunk, false, 0, false, nil
+	}
+	if s.closed {
+		code, ok := readExit(s.exitCode)
+		return nil, true, code, ok, s.changed
+	}
+	return nil, false, 0, false, s.changed
+}
+
+func clampReadBytes(maxBytes int) int {
+	if maxBytes <= 0 || maxBytes > frameSafeMax {
+		return defaultReadBytes
+	}
+	return maxBytes
 }
 
 func readExit(code *int) (int, bool) {
@@ -228,7 +252,12 @@ func (s *Session) Close() {
 	if first {
 		close(s.changed)
 	}
+	notify := s.onChange
 	s.mu.Unlock()
+	// 关闭即结束：唤醒批量读，让它拿到残留输出与 eof 并停止轮询本会话。
+	if first && notify != nil {
+		notify()
+	}
 	if s.session != nil {
 		_ = s.session.Close()
 	}
@@ -252,7 +281,12 @@ func (s *Session) appendOutput(data []byte) {
 		close(s.changed)
 		s.changed = make(chan struct{})
 	}
+	notify := s.onChange
 	s.mu.Unlock()
+	// 会话已关闭时数据仍进缓冲，批量读按缓冲唤醒才拿得到尾部输出。
+	if notify != nil {
+		notify()
+	}
 }
 
 // markDead 由 Wait goroutine 调用：远端退出，记录退出码并唤醒等待者。
@@ -267,7 +301,11 @@ func (s *Session) markDead(exitCode *int) {
 	s.exitCode = exitCode
 	s.deadAt = time.Now()
 	close(s.changed)
+	notify := s.onChange
 	s.mu.Unlock()
+	if notify != nil {
+		notify()
+	}
 }
 
 // Manager 维护 sessionKey -> Session。会话远端退出后不自动摘除
@@ -276,13 +314,34 @@ type Manager struct {
 	mu        sync.Mutex
 	sessions  map[string]*Session
 	histLimit int
+	// wake 汇总所有会话的输出/结束信号（关旧换新的广播通道）：批量读只
+	// 悬挂在这一条通道上，不必为每个会话起等待 goroutine。
+	wakeMu sync.Mutex
+	wake   chan struct{}
 }
 
 func NewManager(historyLimit int) *Manager {
 	if historyLimit <= 0 {
 		historyLimit = 500
 	}
-	return &Manager{sessions: map[string]*Session{}, histLimit: historyLimit}
+	return &Manager{sessions: map[string]*Session{}, histLimit: historyLimit, wake: make(chan struct{})}
+}
+
+// notify 广播唤醒：关闭当前信号通道并换新，所有等待者一起醒来。读方每轮
+// 自己取空全部缓冲，密集输出只会多空转几轮，不会丢数据。
+func (m *Manager) notify() {
+	m.wakeMu.Lock()
+	close(m.wake)
+	m.wake = make(chan struct{})
+	m.wakeMu.Unlock()
+}
+
+// wakeChan 返回当前信号通道。调用方必须先取通道再收集数据：反过来会漏掉
+// 「取通道」与「收集」之间到达的输出（那时通道已经被换新了）。
+func (m *Manager) wakeChan() <-chan struct{} {
+	m.wakeMu.Lock()
+	defer m.wakeMu.Unlock()
+	return m.wake
 }
 
 // Open 在连接上开一个新的交互式 PTY 会话。
@@ -332,7 +391,7 @@ func (m *Manager) Open(conn *sshclient.Conn, cols, rows int) (*Session, error) {
 	sess := &Session{
 		Key: key, Conn: conn, session: sshSession, stdin: stdin,
 		openedAt: time.Now(), cols: cols, rows: rows,
-		changed: make(chan struct{}), histMax: m.histLimit,
+		changed: make(chan struct{}), histMax: m.histLimit, onChange: m.notify,
 	}
 
 	// stdout/stderr 合流进同一缓冲（终端语义下两者交织渲染）。
@@ -410,8 +469,13 @@ type StatusEntry struct {
 // Remove 摘除会话记录（不关底层 PTY）；不存在时静默。
 func (m *Manager) Remove(key string) {
 	m.mu.Lock()
+	_, existed := m.sessions[key]
 	delete(m.sessions, key)
 	m.mu.Unlock()
+	if existed {
+		// 摘除也是状态变化：唤醒批量读，让它对消失的会话报 eof 收尾。
+		m.notify()
+	}
 }
 
 // CloseByKey 关闭并摘除指定会话；不存在不是错误。
@@ -422,6 +486,8 @@ func (m *Manager) CloseByKey(key string) {
 	m.mu.Unlock()
 	if ok {
 		s.Close()
+		// Close 只在首次关闭时发信号，已亡会话的摘除由这里补一次唤醒。
+		m.notify()
 	}
 }
 
@@ -434,6 +500,9 @@ func (m *Manager) CloseAll() {
 	}
 	m.sessions = map[string]*Session{}
 	m.mu.Unlock()
+	if len(sessions) > 0 {
+		m.notify()
+	}
 	for _, s := range sessions {
 		s.Close()
 	}

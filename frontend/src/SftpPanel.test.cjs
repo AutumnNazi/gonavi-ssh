@@ -599,3 +599,18 @@ for (const change of ['cancel', 'refresh', 'unmount']) test('preview request tok
     assert.deepEqual(view.messages, []); assert.equal(previewModal(view).props.open, false)
   } finally { pending.resolve({ dataBase64: '' }); view.unmount() }
 })
+test('an interrupted transfer explains the cause and offers resume', async () => {
+  const task = { id: 't1', connectionId: 'ready-a', direction: 'download', remotePath: '/data/big.bin', localPath: '', state: 'interrupted', bytesDone: 512, totalBytes: 4096 }
+  const view = fixture(async command => command === 'sftp.list' || command === 'fs.listLocal' ? { entries: [], home: '' } : { tasks: [task] })
+  try {
+    await view.settle()
+    const row = view.find(node => node.props?.className === 'transfer-row')
+    assert.ok(row, '中断的传输必须留在传输列表里')
+    assert.ok(view.find(node => node.type === 'Tooltip' && node.props.title === 'sftp.interruptedHint', row), '关窗打断的传输要标注原因，而不是只留一个状态词')
+    const resume = view.find(node => node.type === 'a' && node.props.children === 'sftp.retry', row)
+    assert.ok(resume, '中断的传输必须给出续传入口')
+    resume.props.onClick()
+    await view.settle()
+    assert.deepEqual(JSON.parse(JSON.stringify(view.calls.filter(call => call.command === 'transfer.retry').map(call => call.args))), [{ taskId: 't1', connectionId: 'ready-a' }])
+  } finally { view.unmount() }
+})

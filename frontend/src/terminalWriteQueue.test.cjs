@@ -400,22 +400,20 @@ test('capacity refusal does not mark the production terminal unavailable or prev
   } finally { first.resolve(); await view.unmount() }
 })
 
-test('read yielding already in progress does not issue one extra read after write exhaustion', async () => {
+// 写入侧彻底失败后终端会退订中枢：在途的那次读取返回后不再发起新轮询，
+// 与旧实现「写失败后停止读取循环」的语义一致（断言跟着改成中枢机制）。
+test('write exhaustion releases the shared read loop instead of issuing one more poll', async () => {
   const attempts = []
   const view = terminalView(async (_command, args) => { attempts.push(args); throw { code: 'too_many_requests' } })
   view.render()('busy input'); await tick()
   try {
     view.reads[0].resolve({ dataBase64: '', eof: false, hasExit: false }); await tick()
-    assert.ok(view.time.scheduled.some(timer => timer.delay === 50 && !timer.cleared))
-    for (let retry = 1; retry <= 40; retry++) {
-      const timer = view.time.scheduled.find(timer => timer.delay !== 50 && !timer.cleared)
-      assert.ok(timer); timer.cleared = true; timer.fn(); await tick()
-    }
+    assert.equal(view.reads.length, 2, 'an empty poll result starts the next poll')
+    for (let retry = 1; retry <= 40; retry++) await view.time.next()
     assert.equal(attempts.length, 41)
-    for (const timer of view.time.scheduled.filter(timer => !timer.cleared)) {
-      timer.cleared = true; timer.fn(); await tick()
-    }
-    assert.equal(view.reads.length, 1, 'yield completion must check unavailable state before bridge invoke')
+    assert.equal(view.reads.length, 2, 'a failed terminal must not poll again')
+    view.reads[1].resolve({ dataBase64: '', eof: false, hasExit: false }); await tick()
+    assert.equal(view.reads.length, 2, 'the hub stops once its last terminal unsubscribed')
     assert.equal(view.time.scheduled.filter(timer => !timer.cleared).length, 0)
   } finally { await view.unmount() }
 })
@@ -463,114 +461,149 @@ test('unknown first outcome after overflow cannot shift any unsent item', async 
   assert.equal(warnings, 2, 'capacity refusal and unknown outcome both need feedback')
 })
 
-function pollLoop(globals) {
-  const source = readFileSync(path.join(__dirname, 'components/TerminalView.tsx'), 'utf8')
-  const ast = ts.createSourceFile('TerminalView.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
-  let poll
-  function visit(node) {
-    if (ts.isFunctionDeclaration(node) && node.name?.text === 'pollLoop') poll = node
-    else ts.forEachChild(node, visit)
-  }
-  visit(ast)
-  assert.ok(poll, 'production polling loop is present')
-  const output = ts.transpileModule(poll.getText(ast), { compilerOptions: { target: ts.ScriptTarget.ES2021 } }).outputText
-  const context = {
-    stopped: false, inputStateRef: { current: 'running' }, RETRY_MAX: 8, RETRY_BASE_MS: 500, RETRY_CAP_MS: 5000,
-    setStatus: () => {}, setDetail: () => {}, describeError: String, t: key => key,
-    osc7Re: /never-match/, onCwdRef: { current: () => {} }, ...globals,
-  }
-  const run = vm.runInNewContext(output + '\npollLoop', context)
-  return { run, stop() { context.stopped = true; globals.writeQueue.stop() } }
+// 读取中枢的测试装置：加载生产的 terminalReadHub 模块，用可控时钟驱动
+// 退避重试，不真实等待。
+function readHub(invokeAs, globals = {}) {
+  return loadTs(path.join(__dirname, 'terminalReadHub.ts'), {
+    ...globals, require: name => (name === './bridge' ? { invokeAs } : {}),
+  })
 }
 
-test('exactly eight silent reads give the local input retry a slot before reading again', async () => {
-  const time = clock()
-  const reads = [], sent = [], views = [], running = []
-  let activeReads = 0, warnings = 0
-  const invokeAs = async (command, args) => {
-    if (command === 'terminal.read') {
-      assert.equal(args.waitMillis, 20000)
-      const result = deferred()
-      reads.push({ result, sessionKey: args.sessionKey })
-      activeReads++
-      try { return await result.promise } finally { activeReads-- }
-    }
-    if (activeReads >= 8) throw { code: 'too_many_requests' }
-    sent.push(args.data)
-  }
-  for (let i = 0; i < 8; i++) {
-    const writeQueue = queue(item => invokeAs('terminal.write', { data: item }), () => warnings++, time)
-    const view = pollLoop({
-      ...time, sessionKey: String(i), writeQueue, invokeAs,
-      decodeChunk: () => '', term: { write: () => {} },
+// 可中断的读取桥：请求挂进 requests，被打断时按宿主取消语义以拒绝收尾。
+function readableBridge(requests) {
+  return async (command, args, options) => {
+    const result = deferred()
+    const request = { sessionKeys: args.sessionKeys, result, aborted: false }
+    requests.push(request)
+    options.signal.addEventListener('abort', () => {
+      request.aborted = true
+      result.reject({ code: 'cancelled' })
     })
-    views.push({ ...view, writeQueue })
-    running.push(view.run())
+    return result.promise
   }
-  assert.equal(activeReads, 8)
-  views[0].writeQueue.enqueue('你好\r')
-  await tick()
-  assert.equal(sent.length, 0)
-  reads[0].result.resolve({ dataBase64: '', eof: false })
-  await tick()
-  assert.equal(activeReads, 7)
-  assert.equal(await time.next(), 100, 'first busy backoff remains below the 1500ms read yield')
-  assert.deepEqual(sent, ['你好\r'])
-  assert.equal(await time.next(), 50, 'read yield checks local pending/in-flight work every 50ms')
-  assert.equal(activeReads, 8)
-  assert.equal(reads.length, 9)
-  assert.equal(warnings, 0)
-  for (const view of views) view.stop()
-  for (const read of reads) read.result.resolve({ dataBase64: '', eof: false })
-  await Promise.all(running)
-})
+}
 
-test('in-flight write alone keeps read yielding bounded at 1500ms', async () => {
-  const time = clock()
-  const writes = deferred(), reads = deferred()
-  let readCount = 0, now = 0
-  const input = queue(() => writes.promise)
-  input.enqueue('first')
-  const view = pollLoop({
-    ...time, Date: { now: () => now }, sessionKey: 'session', writeQueue: input,
-    invokeAs: async () => { readCount++; return reads.promise },
-    decodeChunk: () => '', term: { write: () => {} },
+// 中枢取代了每个标签各自的长轮询：多个终端只应有一条在途 readMulti，
+// 否则标签一多就会把宿主桥的 8 个并发额度占满，按键写入被拒。
+test('eight terminals share a single in-flight readMulti instead of eight long polls', async () => {
+  const requests = [], deliveries = []
+  let active = 0
+  const hub = readHub(async (command, args, options) => {
+    assert.equal(command, 'terminal.readMulti')
+    assert.equal(args.waitMillis, 20000)
+    const result = deferred()
+    const request = { sessionKeys: args.sessionKeys, result }
+    requests.push(request)
+    active++
+    options.signal.addEventListener('abort', () => result.reject({ code: 'cancelled' }))
+    try { return await result.promise } finally { active-- }
   })
-  const running = view.run()
-  assert.equal(readCount, 0, 'in-flight item must participate in the read yield')
-  for (let step = 0; step < 30; step++) {
-    now += 50
-    assert.equal(await time.next(), 50)
+  for (let i = 0; i < 8; i++) {
+    hub.subscribeTerminalRead('s' + i, {
+      onData: data => deliveries.push(['s' + i, data]),
+      onEnd: () => { throw new Error('unexpected end') },
+      onUnavailable: error => { throw error },
+    })
   }
-  assert.equal(readCount, 1, 'read must resume at the existing 1500ms limit even if write has not resolved')
-  view.stop()
-  writes.resolve()
-  reads.resolve({ dataBase64: '', eof: false })
-  await running
+  await tick()
+  assert.equal(active, 1, 'eight terminals keep exactly one long poll in flight')
+  assert.deepEqual([...requests.at(-1).sessionKeys], ['s0', 's1', 's2', 's3', 's4', 's5', 's6', 's7'])
+  requests.at(-1).result.resolve({
+    events: [{ sessionKey: 's3', dataBase64: 'dGhyZWU=' }, { sessionKey: 's7', dataBase64: 'c2V2ZW4=' }],
+  })
+  await tick()
+  assert.deepEqual(deliveries, [['s3', 'dGhyZWU='], ['s7', 'c2V2ZW4=']], 'each chunk reaches only its own terminal')
+  assert.equal(active, 1, 'the next poll keeps the single-slot invariant')
 })
 
-test('poll EOF and exhausted read retries stop writes before reporting terminal state', async () => {
-  for (const exhausted of [false, true]) {
-    const time = clock()
-    const input = queue(async () => {})
-    let count = 0, state
-    const view = pollLoop({
-      ...time, sessionKey: 'session', writeQueue: input,
-      invokeAs: async () => {
-        count++
-        if (exhausted) throw new Error('read failed')
-        return { dataBase64: '', eof: true, hasExit: false }
-      },
-      decodeChunk: () => '', term: { write: () => {} },
-      setStatus: value => { state = value; assert.equal(input.enqueue('after-stop'), false) },
-    })
-    const running = view.run()
-    await tick()
-    if (exhausted) for (let retry = 0; retry < 8; retry++) await time.next()
-    await running
-    assert.equal(count, exhausted ? 9 : 1)
-    assert.equal(state, exhausted ? 'error' : 'closed')
+// 宿主桥的并发上限就是 8 个在途调用。长效读取只该占 1 个，剩下的留给按键：
+// 这条断言用「八标签 + 七个并发写入」把额度账算清楚。
+test('one long poll leaves the other bridge slots free for key input', async () => {
+  const writes = [], sent = []
+  let active = 0
+  const bridge = async (command, args, options) => {
+    if (active >= 8) throw { code: 'too_many_requests' }
+    active++
+    try {
+      const result = deferred()
+      if (command === 'terminal.readMulti') {
+        options.signal.addEventListener('abort', () => result.reject({ code: 'cancelled' }))
+        return await result.promise
+      }
+      sent.push(args.dataBase64)
+      writes.push(result)
+      return await result.promise
+    } finally { active-- }
   }
+  const hub = readHub(bridge)
+  for (let i = 0; i < 8; i++) {
+    hub.subscribeTerminalRead('s' + i, { onData() {}, onEnd() {}, onUnavailable() {} })
+  }
+  await tick()
+  assert.equal(active, 1, 'eight terminals must hold exactly one bridge slot')
+  const pending = []
+  for (let i = 0; i < 7; i++) pending.push(bridge('terminal.write', { dataBase64: 'a2V5' }))
+  await tick()
+  assert.equal(active, 8, 'seven concurrent writes must still fit beside the single long poll')
+  assert.deepEqual(sent, Array(7).fill('a2V5'))
+  for (const write of writes) write.resolve({})
+  await Promise.all(pending)
+})
+
+// 新标签加入必须立刻能拿到自己的第一屏输出：在途批次里没有它时打断重发，
+// 而不是干等这次长轮询返回（最长 20 秒），否则新开的终端会白屏很久。
+test('a new terminal interrupts the in-flight poll instead of waiting it out', async () => {
+  const time = clock()
+  const requests = []
+  const hub = readHub(readableBridge(requests), time)
+  hub.subscribeTerminalRead('s0', { onData() {}, onEnd() {}, onUnavailable() {} })
+  hub.subscribeTerminalRead('s1', { onData() {}, onEnd() {}, onUnavailable() {} })
+  await tick()
+  assert.equal(requests[0].aborted, true, 'the batch that predates the new terminal must be cancelled')
+  assert.deepEqual([...requests.at(-1).sessionKeys], ['s0', 's1'])
+  assert.equal(requests.at(-1).aborted, false)
+  assert.equal(time.scheduled.length, 0, 'self-cancelling must not count as a failure or back off')
+})
+
+test('eof ends its terminal and drops it from later requests', async () => {
+  const requests = [], ends = []
+  const hub = readHub(readableBridge(requests))
+  hub.subscribeTerminalRead('s0', { onData() {}, onEnd: (hasExit, code) => ends.push([hasExit, code]), onUnavailable() {} })
+  hub.subscribeTerminalRead('s1', { onData() {}, onEnd() {}, onUnavailable() {} })
+  await tick()
+  requests.at(-1).result.resolve({ events: [{ sessionKey: 's0', eof: true, hasExit: true, exitCode: 3 }] })
+  await tick()
+  assert.deepEqual(ends, [[true, 3]])
+  assert.deepEqual([...requests.at(-1).sessionKeys], ['s1'], 'a finished terminal must not be polled again')
+})
+
+test('unsubscribing a terminal removes it from the next request and from delivery', async () => {
+  const requests = [], deliveries = []
+  const hub = readHub(readableBridge(requests))
+  const off0 = hub.subscribeTerminalRead('s0', { onData: data => deliveries.push(data), onEnd() {}, onUnavailable() {} })
+  hub.subscribeTerminalRead('s1', { onData() {}, onEnd() {}, onUnavailable() {} })
+  await tick()
+  assert.deepEqual([...requests.at(-1).sessionKeys], ['s0', 's1'])
+  const current = requests.at(-1)
+  off0()
+  current.result.resolve({ events: [{ sessionKey: 's0', dataBase64: 'bGF0ZQ==' }] })
+  await tick()
+  assert.deepEqual(deliveries, [], 'an unsubscribed terminal must not receive late data')
+  assert.deepEqual([...requests.at(-1).sessionKeys], ['s1'])
+})
+
+test('read failures back off eight times and then release every terminal as unavailable', async () => {
+  const time = clock()
+  const releases = []
+  const hub = readHub(async () => { throw new Error('transport unavailable') }, time)
+  for (const key of ['s0', 's1']) {
+    hub.subscribeTerminalRead(key, { onData() {}, onEnd() {}, onUnavailable: error => releases.push(error.message) })
+  }
+  await tick()
+  assert.deepEqual(releases, [], 'a single failure must only back off')
+  for (let retry = 0; retry < 8; retry++) await time.next()
+  assert.deepEqual(releases, ['transport unavailable', 'transport unavailable'], 'every terminal is told once')
+  assert.equal(time.scheduled.filter(timer => !timer.cleared).length, 0, 'giving up must leave no retry timer')
 })
 
 function terminalView(write, clipboard = { writeText: async () => {} }, initialPrefs, settings = { quickCommands: [], cwdFollow: false }) {
@@ -619,10 +652,34 @@ function terminalView(write, clipboard = { writeText: async () => {} }, initialP
   }
   const b64 = loadTs(path.join(__dirname, 'b64.ts'), { TextEncoder, TextDecoder, atob, btoa })
   const createTerminalWriteQueue = loadTs(path.join(__dirname, 'terminalWriteQueue.ts'), time).createTerminalWriteQueue
+  // 读取由窗口级中枢（真实模块）发出，测试仍按原方式驱动：每个在途的
+  // readMulti 调用挂进 reads，resolve 时按当前 sessionKey 包成事件。
+  let currentSessionKey = 'session'
   const invokeAs = async (command, args, options) => {
-    if (command === 'terminal.read') {
+    if (command === 'terminal.readMulti') {
       const result = deferred()
-      reads.push(result)
+      // 事件归属发出这次调用时的会话：切到新会话后回放旧读取的结果，
+      // 不能算到新会话头上。
+      const issuedFor = currentSessionKey
+      const read = {
+        sessionKeys: args.sessionKeys,
+        aborted: false,
+        resolve(event) {
+          result.resolve({ events: event ? [{ sessionKey: issuedFor, ...event }] : [] })
+        },
+        // 指定事件归属：关闭会话时要投给当前会话，而不是这次调用当初服务的会话。
+        resolveFor(sessionKey, event) {
+          result.resolve({ events: [{ sessionKey, ...event }] })
+        },
+        reject(error) { result.reject(error) },
+      }
+      reads.push(read)
+      // 中枢加入新会话时会打断在途读取（宿主侧就是 $/cancelRequest），
+      // 这里按同样的语义以拒绝收尾，中枢随即带新会话集合重发。
+      options?.signal?.addEventListener('abort', () => {
+        read.aborted = true
+        result.reject({ code: 'cancelled' })
+      })
       return result.promise
     }
     if (command === 'settings.get') return { settings }
@@ -630,6 +687,9 @@ function terminalView(write, clipboard = { writeText: async () => {} }, initialP
   }
   const hostPrefs = loadTs(path.join(__dirname, 'hostPrefs.ts'), { window, navigator: { language: 'en-US' }, document })
   const terminalTheme = existsSync(path.join(__dirname, 'terminalTheme.ts')) ? loadTs(path.join(__dirname, 'terminalTheme.ts'), { document }) : {}
+  const terminalReadHub = loadTs(path.join(__dirname, 'terminalReadHub.ts'), {
+    ...time, require: name => (name === './bridge' ? { invokeAs } : {}),
+  })
   const exports = loadTs(path.join(__dirname, 'components/TerminalView.tsx'), {
     ...time, Date: { now: () => now }, Terminal, FitAddon, ResizeObserver, navigator: { clipboard }, document,
     require(name) {
@@ -639,6 +699,7 @@ function terminalView(write, clipboard = { writeText: async () => {} }, initialP
       if (name === '@xterm/xterm') return { Terminal }
       if (name === '@xterm/addon-fit') return { FitAddon }
       if (name === '../terminalWriteQueue') return { createTerminalWriteQueue }
+      if (name === '../terminalReadHub') return terminalReadHub
       if (name === '../bridge') return { invokeAs, describeError: String }
       if (name === '../b64') return b64
       if (name === '../i18n') return { t: key => key }
@@ -649,6 +710,7 @@ function terminalView(write, clipboard = { writeText: async () => {} }, initialP
   })
   function render(sessionKey = 'session') {
     cursor = 0
+    currentSessionKey = sessionKey
     rendered = exports.TerminalView({ tab: { sessionKey, connectionId: 'connection', tabKey: 'tab' }, allTabs: [], onCwd() {} })
     for (const run of pending.splice(0)) run()
     return terminals.at(-1).input
@@ -659,11 +721,16 @@ function terminalView(write, clipboard = { writeText: async () => {} }, initialP
     preferences(value) { window.gonaviHostPrefs = value; window.dispatchEvent(new Event('gonavi:host-preferences')) },
     setVisible(value) { hostVisible = value; observers.at(-1).callback() },
     setNow(value) { now = value },
-    closeSession() { reads.at(-1).resolve({ dataBase64: '', eof: true, hasExit: false }) },
+    // 会话结束在真实链路里表现为一次读取返回 eof。中枢会打断过时的在途
+    // 读取，所以先等一拍，再把 eof 投给当前会话。
+    async closeSession() {
+      await tick()
+      reads.at(-1).resolveFor(currentSessionKey, { dataBase64: '', eof: true, hasExit: false })
+    },
     failRead(error) { reads.at(-1).reject(error) },
     async unmount() {
       for (const effect of effects) effect?.cleanup?.()
-      for (const result of reads) result.resolve({ dataBase64: '', eof: false })
+      for (const read of reads) read.resolve()
       await tick()
     },
   }
@@ -877,13 +944,16 @@ test('only hidden-to-visible terminal transitions restore focus, keeping the sam
   } finally { await view.unmount() }
 })
 
-test('new terminal copy and scope messages exist in all six locale catalogs', () => {
+test('new terminal, transfer-interrupt and window-close messages exist in all six locale catalogs', () => {
   const source = readFileSync(path.join(__dirname, 'i18n.ts'), 'utf8')
   const ast = ts.createSourceFile('i18n.ts', source, ts.ScriptTarget.Latest, true)
   const dictionaries = ast.statements.filter(ts.isVariableStatement).flatMap(s => [...s.declarationList.declarations])
     .filter(d => ['zhCN', 'zhTW', 'en', 'ja', 'de', 'ru'].includes(d.name.getText(ast)))
   assert.equal(dictionaries.length, 6)
-  const newKeys = ['term.copy', 'term.broadcastScope', 'term.selectionHelp', 'term.copied', 'term.copyFailed', 'term.pasteFailed', 'term.inputClosed', 'term.inputUnavailable']
+  const newKeys = [
+    'term.copy', 'term.broadcastScope', 'term.selectionHelp', 'term.copied', 'term.copyFailed', 'term.pasteFailed', 'term.inputClosed', 'term.inputUnavailable',
+    'state.interrupted', 'sftp.interruptedHint', 'app.closeWindow', 'app.closeTitle', 'app.closeBody', 'app.closeConfirm', 'app.closeStay', 'app.interruptedNotice',
+  ]
   for (const dict of dictionaries) {
     const properties = dict.initializer.properties
     const keys = properties.map(p => p.name.text)

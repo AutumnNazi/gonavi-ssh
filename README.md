@@ -38,7 +38,7 @@ internal/sftpops/   SFTP 与本地 FS 操作（列表/增删改/预览/磁盘用
 internal/transfer/  传输任务（上传原子替换 / 下载 .part 断点续传 / 进度 / 取消）
 internal/agentcmd/  agent.exec / execSudo / runBg / taskStatus / metrics / triage
 internal/settings/  只读模式（含 GONAVI_SSH_READ_ONLY=1 强制）、sudo 白名单、快速命令
-internal/server/    49 个命令的路由与只读 gate
+internal/server/    50 个命令的路由与只读 gate
 frontend/           独立窗口 UI（React 18 + AntD 5 + xterm.js，六语言跟随宿主）
 scripts/package.sh  组装插件包（三平台二进制 + 前端 + 清单 → zip）
 ```
@@ -111,7 +111,7 @@ v0.1.1 已重发：插件 ID 为 `gh-autumnnazi.ssh`，安装包为 `gh-autumnna
 
 ## Agent 工具（ai.tools）
 
-清单声明了 `ai.tools`：全部 49 个命令进入 GoNavi Agent 工具目录（`plugin__` 前缀），
+清单声明了 `ai.tools`：全部 50 个命令进入 GoNavi Agent 工具目录（`plugin__` 前缀），
 GoNavi 自带 MCP Server 时可被外部编码代理调用。写效果命令统一标 `side_effect_unknown`
 走宿主审批；插件级只读模式开启后所有写命令直接拒绝。
 

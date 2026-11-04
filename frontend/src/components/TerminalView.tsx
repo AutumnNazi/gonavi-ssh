@@ -7,6 +7,7 @@ import '@xterm/xterm/css/xterm.css'
 import { invokeAs, describeError } from '../bridge'
 import { encodeText, createStreamDecoder } from '../b64'
 import { createTerminalWriteQueue } from '../terminalWriteQueue'
+import { subscribeTerminalRead } from '../terminalReadHub'
 import { t } from '../i18n'
 import { hostPrefs, subscribeHostPrefs } from '../hostPrefs'
 import { terminalOptions } from '../terminalTheme'
@@ -15,13 +16,6 @@ import type { QuickCommand, TerminalTab } from '../types'
 interface WriteRequest {
   command: 'terminal.write' | 'terminal.writeMulti'
   args: { sessionKey?: string; sessionKeys?: string[]; dataBase64: string }
-}
-
-interface ReadResult {
-  dataBase64: string
-  eof: boolean
-  hasExit: boolean
-  exitCode?: number
 }
 
 // OSC 7（shell 工作目录通知）：xterm 输出流里匹配 file://host/path，
@@ -35,10 +29,6 @@ interface Props {
   onCwd: (path: string) => void
 }
 
-// 轮询失败退避：瞬时错误（桥忙/超时）不应终止读取循环。
-const RETRY_MAX = 8
-const RETRY_BASE_MS = 500
-const RETRY_CAP_MS = 5000
 const INPUT_WARNING_INTERVAL_MS = 1500
 
 
@@ -63,6 +53,9 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
   const onCwdRef = useRef(onCwd)
   const writeQueueRef = useRef<ReturnType<typeof createTerminalWriteQueue<WriteRequest>> | null>(null)
   const nextInputWarningRef = useRef(0)
+  // 写入侧彻底失败（会话结束或桥不可用）后终端已定格在提示层上，
+  // 由 effect 注入退订函数，别让中枢继续为它占着桥额度。
+  const stopReadingRef = useRef<() => void>(() => {})
   broadcastRef.current = broadcast
   allTabsRef.current = allTabs
   onCwdRef.current = onCwd
@@ -76,6 +69,8 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
 
   const warnInputDropped = (reason?: 'ended' | 'unavailable') => {
     if (reason) {
+      // 输入已经不可用：读取也没有意义了（会话结束或桥不再接受调用）。
+      stopReadingRef.current()
       const state = reason === 'ended' ? 'closed' : 'error'
       inputStateRef.current = state
       setStatus(state)
@@ -225,61 +220,42 @@ export function TerminalView({ tab, allTabs, onCwd }: Props) {
       }, 800)
     }
 
-    async function pollLoop() {
-      let retries = 0
-      while (!stopped && inputStateRef.current === 'running') {
-        // 写优先：桥并发预算被长轮询占满时，先把槽位让给按键，
-        // 避免 write 被持续拒绝。
-        if (writeQueue.hasWork()) {
-          const until = Date.now() + 1500
-          while (writeQueue.hasWork() && !stopped && Date.now() < until) {
-            await new Promise(r => setTimeout(r, 50))
-          }
-        }
-        if (stopped || inputStateRef.current !== 'running') break
-        try {
-          const res = await invokeAs<ReadResult>('terminal.read', {
-            sessionKey,
-            maxBytes: 65536,
-            waitMillis: 20000,
-          })
-          if (stopped || inputStateRef.current !== 'running') break
-          retries = 0
-          if (res.dataBase64) {
-            const text = decodeChunk(res.dataBase64)
-            term.write(text)
-            osc7Re.lastIndex = 0
-            const m = osc7Re.exec(text)
-            if (m && m[1]) onCwdRef.current(m[1])
-          }
-          if (res.eof) {
-            inputStateRef.current = 'closed'
-            writeQueue.stop()
-            setStatus('closed')
-            setDetail(res.hasExit ? t('term.exitCode', { code: res.exitCode ?? -1 }) : t('term.ended'))
-            return
-          }
-        } catch (e) {
-          if (stopped || inputStateRef.current !== 'running') return
-          // 瞬时失败（桥并发满/超时）退避重试；连续失败才终止。
-          if (retries >= RETRY_MAX) {
-            inputStateRef.current = 'error'
-            writeQueue.stop()
-            setStatus('error')
-            setDetail(describeError(e))
-            term.write(`\r\n\x1b[31m${describeError(e)}\x1b[0m\r\n`)
-            return
-          }
-          const delay = Math.min(RETRY_BASE_MS * 2 ** retries, RETRY_CAP_MS)
-          retries++
-          await new Promise(r => setTimeout(r, delay))
-        }
-      }
-    }
-    pollLoop()
+    // 读取交给窗口级中枢：本窗口所有标签共用一条 readMulti 长轮询，
+    // 标签数量不再吃掉宿主桥的并发额度（上限 8，超出的写入会被拒）。
+    // 会话已经结束或出错的终端不再接受中枢回调——迟到的分片不能把
+    // 失败状态改写成“已结束”，也不能再往终端里写字。
+    const stillReading = () => !stopped && inputStateRef.current === 'running'
+    const unsubscribeRead = subscribeTerminalRead(sessionKey, {
+      onData: dataBase64 => {
+        if (!stillReading()) return
+        const text = decodeChunk(dataBase64)
+        term.write(text)
+        osc7Re.lastIndex = 0
+        const m = osc7Re.exec(text)
+        if (m && m[1]) onCwdRef.current(m[1])
+      },
+      onEnd: (hasExit, exitCode) => {
+        if (!stillReading()) return
+        inputStateRef.current = 'closed'
+        writeQueue.stop()
+        setStatus('closed')
+        setDetail(hasExit ? t('term.exitCode', { code: exitCode ?? -1 }) : t('term.ended'))
+      },
+      onUnavailable: e => {
+        if (!stillReading()) return
+        inputStateRef.current = 'error'
+        writeQueue.stop()
+        setStatus('error')
+        setDetail(describeError(e))
+        term.write(`\r\n\x1b[31m${describeError(e)}\x1b[0m\r\n`)
+      },
+    })
+    stopReadingRef.current = unsubscribeRead
 
     return () => {
       stopped = true
+      unsubscribeRead()
+      if (stopReadingRef.current === unsubscribeRead) stopReadingRef.current = () => {}
       writeQueue.stop()
       if (writeQueueRef.current === writeQueue) writeQueueRef.current = null
       if (injectTimer !== undefined) clearTimeout(injectTimer)

@@ -74,6 +74,51 @@ func TestRemoteRetryCancelledHandler(t *testing.T) {
 	}
 }
 
+// 关窗清理会把在跑的传输记成 interrupted（不是 cancelled）。这条路以前在路由层
+// 的状态门就被挡掉，前端点「重试（续传）」只会收到「只能重试失败或已取消的任务」。
+func TestRemoteRetryAfterWindowCloseInterrupt(t *testing.T) {
+	handlers := sftp.InMemHandler()
+	block := &blockedRemoteRead{FileReader: handlers.FileGet, started: make(chan struct{}), release: make(chan struct{})}
+	handlers.FileGet = block
+	app, source, target, srcClient, dstClient := remoteRetryApp(t, handlers)
+	seedRemoteRetry(t, srcClient, "/from", "interrupted body")
+	old, err := app.transfers.StartRemote(source, "/from", target, "/to")
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-block.started:
+	case <-time.After(3 * time.Second):
+		close(block.release)
+		t.Fatal("source was not opened")
+	}
+	// 宿主关窗时的清理：记中断后再取消，等价于窗口关闭。
+	app.transfers.CloseAll()
+	close(block.release)
+	if status := waitRemoteRetry(t, app.transfers, old.ID); status.State != transfer.Interrupted {
+		t.Fatalf("closed status=%s %s", status.State, status.Error)
+	}
+	res, err := invoke(t, retryUIHandler(app, map[string]*sshclient.Conn{source.ID: source, target.ID: target}), templateRemoteRetry(old.ID, source.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := waitRemoteRetry(t, app.transfers, res["taskId"].(string)); status.State != transfer.Done {
+		t.Fatalf("retry status=%s %s", status.State, status.Error)
+	}
+	file, err := dstClient.Open("/to")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(file)
+	file.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "interrupted body" {
+		t.Errorf("body=%q", data)
+	}
+}
+
 func TestRemoteRetryRejectsInvalidRoute(t *testing.T) {
 	for _, scenario := range []string{"unknown", "done", "missing target", "missing source", "same endpoints", "changed source", "changed target"} {
 		t.Run(scenario, func(t *testing.T) {
@@ -95,7 +140,7 @@ func TestRemoteRetryRejectsInvalidRoute(t *testing.T) {
 				wantCode = errNotFound
 				wantText = "task not found"
 			case "done":
-				wantText = "only failed or cancelled"
+				wantText = "only failed, cancelled or interrupted"
 			case "missing target":
 				delete(connections, target.ID)
 				wantCode = errNotFound
