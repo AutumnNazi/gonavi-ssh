@@ -18,9 +18,16 @@ import (
 	"time"
 
 	"github.com/pkg/sftp"
+	"golang.org/x/crypto/ssh"
 
 	"gonavi-ssh/internal/sshclient"
 )
+
+// newSftpClient 打开连接的 SFTP 通道（一次网络往返）。抽成变量是为了让测试
+// 注入一个卡住的打开动作，锁住「建通道期间不持有管理器锁」这条不变量。
+var newSftpClient = func(client *ssh.Client) (*sftp.Client, error) {
+	return sftp.NewClient(client)
+}
 
 // Entry 是目录条目的统一视图（远程与本地同构）。
 type Entry struct {
@@ -43,17 +50,34 @@ func NewManager() *Manager {
 	return &Manager{clients: map[string]*sftp.Client{}}
 }
 
+// client 取连接缓存的 SFTP 客户端，没有就建一个。锁只保护连接表：
+// 建通道是一次网络往返，必须放在锁外，否则一条假死链路的通道开不出来，
+// 全插件的文件操作与传输启动都会跟着等这把锁。
 func (m *Manager) client(conn *sshclient.Conn) (*sftp.Client, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if c, ok := m.clients[conn.ID]; ok {
-		return c, nil
+	cached, ok := m.clients[conn.ID]
+	m.mu.Unlock()
+	if ok {
+		return cached, nil
 	}
-	c, err := sftp.NewClient(conn.Client())
+	c, err := newSftpClient(conn.Client())
 	if err != nil {
 		return nil, fmt.Errorf("open sftp channel: %w", err)
 	}
+	m.mu.Lock()
+	if existing, ok := m.clients[conn.ID]; ok {
+		// 放锁期间另一个调用已经建好了同一连接的通道：留先到的那个，
+		// 把自己多建的这条关掉（关闭同样在锁外做）。
+		m.mu.Unlock()
+		_ = c.Close()
+		return existing, nil
+	}
+	// 只剩一种交错没挡住：建通道期间连接本身被关掉（conns.OnDead → Close），
+	// 那时表里没有条目可摘，本次建好的通道会留在表里直到下一次 CloseAll。
+	// 该连接已死、其 ID 不会再落到调用方手里，只是一条无用条目，不构成可见故障；
+	// 要彻底堵住得给 Close 加「等待在途建通道」的登记，为这点收益不值得上那套机制。
 	m.clients[conn.ID] = c
+	m.mu.Unlock()
 	return c, nil
 }
 
@@ -62,24 +86,32 @@ func (m *Manager) Client(conn *sshclient.Conn) (*sftp.Client, error) {
 	return m.client(conn)
 }
 
-// Close 丢弃某连接的 sftp client（连接关闭时调用）。
+// Close 丢弃某连接的 sftp client（连接关闭时调用）。先从表里摘掉再关：
+// 关闭是网络收尾，锁外做，卡住的收尾不会拖住其他连接的文件操作。
 func (m *Manager) Close(connectionID string) {
 	m.mu.Lock()
-	if c, ok := m.clients[connectionID]; ok {
-		_ = c.Close()
-		delete(m.clients, connectionID)
-	}
+	c, ok := m.clients[connectionID]
+	delete(m.clients, connectionID)
 	m.mu.Unlock()
+	if !ok {
+		return
+	}
+	_ = c.Close()
 }
 
-// CloseAll 关闭全部 sftp client。
+// CloseAll 关闭全部 sftp client。先清表再逐个关：关窗清理限时提前返回时，
+// 新窗口看到的是空表而不是半关状态。
 func (m *Manager) CloseAll() {
 	m.mu.Lock()
-	for id, c := range m.clients {
-		_ = c.Close()
-		delete(m.clients, id)
+	clients := make([]*sftp.Client, 0, len(m.clients))
+	for _, c := range m.clients {
+		clients = append(clients, c)
 	}
+	m.clients = map[string]*sftp.Client{}
 	m.mu.Unlock()
+	for _, c := range clients {
+		_ = c.Close()
+	}
 }
 
 // List 分页列远程目录；limit<=0 用默认 500，返回条目与是否还有更多。
