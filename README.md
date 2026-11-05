@@ -87,6 +87,15 @@ v0.1.2 将此图标纳入插件包，增强深浅主题下的辨识度。打包�
 - 使用同一张 256×256 透明 PNG，源文件 `frontend/public/icon.png` 随离线前端资源打包为 `frontend/icon.png`。
 - 打包回归校验图标尺寸、大小、清单路径与归档内 PNG 字节一致性。
 
+## v0.1.5 发布说明
+
+- 修复窗口白屏：宿主自 GoNavi `6c0c072`（dev，11-04）起把入口文档直接放在 `/` 上返回，不再 302 到 `/plugin-assets/frontend/index.html`，文档里的相对路径因此解析成 `/assets/...` 被宿主前缀守卫挡掉 404，页面没有任何脚本执行。前端资源改用 `/plugin-assets/frontend/` 下的绝对路径后恢复正常；**在含该改动的宿主上 v0.1.4 的窗口无法显示，请升级到 v0.1.5**。
+- 修复「测试连接 / 保存」报 `[unhandledrejection] [object Object]`：表单校验失败被丢成未处理的 promise 拒绝，启动期错误面板会盖住整个窗口；现在校验失败就地停下（字段下已有提示），面板上也会显示插件错误的真实原因（`describeError` 取代 `String(reason)`）。
+- 修复挑战续跑路径的同类崩溃：提交二次提问（如 TOTP）后要再轮询一次 `conn.status` 才能开终端，这段轮询原本写在 try 之外，而弹窗 `onOk` 与输入框回车都不接管返回的 promise——一次失败又是 `[unhandledrejection]` 盖住整个窗口；现在整段收在一个 try 里，失败就地提示并停下。
+- 组包守卫补三条：入口文档的 `src`/`href` 必须是 `/plugin-assets/frontend/` 下的绝对路径、必须指向真实存在的文件、路径不含 `..` 段（前缀匹配挡不住逃逸）；一个 `src`/`href` 都没有也直接失败——这类包必然白屏。
+- 打包回归 fixture 的入口文档改为按真实构建的样子产出（绝对路径 + 真实存在的资源），避免用例建在不再是真实形态的产物上。
+- 后端与命令清单不变（本次无 Go 代码改动）。
+
 ## v0.1.4 发布说明
 
 - 补齐 `ui.html-panel` 权限与说明：宿主自 GoNavi `00021c5bc`（dev，11-01）起要求声明 `window` 的插件显式持有该权限，否则清单在解码/校验阶段即被拒绝（`window requires the ui.html-panel permission`）。
