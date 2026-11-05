@@ -159,25 +159,29 @@ export default function App() {
     setChallengeQueue(prev => prev.slice(1))
     const filled = answers.map(a => a ?? '')
     setAnswers([])
+    // 提交答案、继续等 ready、ready 后取最新状态开终端：整段收在一个 try 里。
+    // 弹窗的 onOk 和输入框回车都直接调用本函数，谁都不接管返回的 promise，
+    // 中途任何一次桥接调用失败都会变成未处理的拒绝，启动期错误面板随即盖住
+    // 整个窗口——和表单校验那处一样，失败必须就地报给用户。
     try {
       await invokeAs('conn.answer', {
         connectionId: ctx.conn.connectionId,
         // 后端按 prompts 数量取答案；UI 只填了第一个时其余送空串。
         answers: filled.length > 0 ? filled : [''],
       })
+      // 继续等待 ready（可能还有下一轮提问）。
+      const profile = profiles.find(p => p.id === ctx.conn.profileId) ?? null
+      const result = await waitReady(ctx.conn.connectionId, profile ?? ({ id: ctx.conn.profileId, name: ctx.conn.addr ?? '' } as ProfileView))
+      if (result === 'ready') {
+        const fresh = await invokeAs<{ connections: ConnectionInfo[] }>('conn.status', {
+          connectionId: ctx.conn.connectionId,
+        })
+        if (fresh.connections?.[0]) {
+          await openTerminalTab(fresh.connections[0], profile)
+        }
+      }
     } catch (e) {
       message.error(`${describeError(e)}`)
-    }
-    // 继续等待 ready（可能还有下一轮提问）。
-    const profile = profiles.find(p => p.id === ctx.conn.profileId) ?? null
-    const result = await waitReady(ctx.conn.connectionId, profile ?? ({ id: ctx.conn.profileId, name: ctx.conn.addr ?? '' } as ProfileView))
-    if (result === 'ready') {
-      const fresh = await invokeAs<{ connections: ConnectionInfo[] }>('conn.status', {
-        connectionId: ctx.conn.connectionId,
-      })
-      if (fresh.connections?.[0]) {
-        await openTerminalTab(fresh.connections[0], profile)
-      }
     }
   }, [challenge, answers, profiles, waitReady, openTerminalTab])
 

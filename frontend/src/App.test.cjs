@@ -8,6 +8,8 @@ const ts = require('typescript')
 // 关窗入口与重开提示：跑真实 App 源码 + 假 react hook 运行时，
 // 断言落在行为上（有传输在跑必须先确认、查不到状态不能扣住窗口），
 // 不是断言源码里出现过哪段字符串。
+// 挑战续跑（TDD 复现用）：APP_SOURCE_FILE 可指向另一份 App.tsx，
+// 用来证明新增的挑战用例在修复前是红的。
 function fixture(invoke = async () => ({ tasks: [] })) {
   const hooks = [], effects = [], scheduled = [], calls = [], tCalls = [], messages = [], modals = [], closed = []
   let cursor = 0, tree, changed = false
@@ -113,6 +115,17 @@ function fixture(invoke = async () => ({ tasks: [] })) {
       assert.equal(extra?.type, 'Button', '关窗入口必须挂在顶栏')
       return extra
     },
+    // 挑战弹窗没挂 className，按标题定位（i18n 桩返回 key）。
+    challengeModal() {
+      const modal = find(node => node.props?.title === 'prompt.title')
+      assert.ok(modal, '挑战弹窗必须渲染')
+      return modal
+    },
+    connect(profile) {
+      const panel = find(node => node.type === 'ProfilePanel')
+      assert.ok(panel, '连接面板必须渲染')
+      return panel.props.onConnect(profile)
+    },
     unmount() { for (const e of effects) e?.cleanup?.() },
   }
 }
@@ -190,5 +203,81 @@ test('reopening the window stays quiet when no transfer was interrupted', async 
   try {
     await view.settle()
     assert.equal(view.messages.some(message => message.text === 'app.interruptedNotice'), false)
+  } finally { view.unmount() }
+})
+
+// 挑战（二次提问）续跑路径：弹窗的 onOk 与输入框回车都直接调用 submitChallenge，
+// 谁都不接管它返回的 promise。这条路径上任何一次 conn.status 失败都会被抛成
+// 未处理的 promise 拒绝，启动期错误面板随即盖住整个窗口——与表单校验失败同源。
+const CONNECTED = { connectionId: 'c1', profileId: 'p1', state: 'connecting' }
+const NEED_INPUT = {
+  connections: [{
+    connectionId: 'c1', profileId: 'p1', state: 'needInput',
+    challenge: { instruction: 'TOTP', stage: 'auth', prompts: ['验证码'] },
+  }],
+}
+const READY = { connections: [{ connectionId: 'c1', profileId: 'p1', state: 'ready', addr: '10.0.0.1' }] }
+const PROFILE = { id: 'p1', name: 'host-a' }
+
+// 连上并让挑战进队列，再取弹窗 onOk：第二次渲染后 challenge 才进 submitChallenge
+// 的闭包，一渲染就取会拿到 challenge 仍为 null 的旧闭包。
+async function answeredChallenge(view) {
+  await view.connect(PROFILE)
+  await view.settle()
+  return view.challengeModal().props.onOk
+}
+
+test('a failing status poll while resuming a challenge never escapes the modal handler', async () => {
+  let polls = 0
+  const view = fixture(async (command, args) => {
+    if (command === 'conn.status' && args?.connectionId === 'c1') {
+      polls += 1
+      if (polls === 1) return NEED_INPUT
+      throw { code: 4101, message: '会话已结束' }
+    }
+    return command === 'conn.open' ? CONNECTED : {}
+  })
+  try {
+    const onOk = await answeredChallenge(view)
+    await assert.doesNotReject(onOk(), '续跑轮询失败不能被丢成未处理的 promise 拒绝')
+    assert.equal(view.messages.some(m => m.type === 'error' && m.text.includes('会话已结束')), true, '失败原因要提示到界面上')
+  } finally { view.unmount() }
+})
+
+test('a failing fresh-status call after ready never escapes the modal handler', async () => {
+  let polls = 0
+  const view = fixture(async (command, args) => {
+    if (command === 'conn.status' && args?.connectionId === 'c1') {
+      polls += 1
+      if (polls === 1) return NEED_INPUT
+      if (polls === 2) return READY
+      throw { code: 4101, message: '会话已结束' }
+    }
+    return command === 'conn.open' ? CONNECTED : {}
+  })
+  try {
+    const onOk = await answeredChallenge(view)
+    await assert.doesNotReject(onOk(), 'ready 后取状态失败也不能逃逸')
+    assert.equal(view.messages.some(m => m.type === 'error' && m.text.includes('会话已结束')), true)
+    assert.equal(view.calls.some(call => call.command === 'terminal.open'), false, '状态取不到就不该开终端')
+  } finally { view.unmount() }
+})
+
+test('an answered challenge still opens the terminal tab', async () => {
+  let polls = 0
+  const view = fixture(async (command, args) => {
+    if (command === 'conn.status' && args?.connectionId === 'c1') {
+      polls += 1
+      return polls === 1 ? NEED_INPUT : READY
+    }
+    if (command === 'conn.open') return CONNECTED
+    if (command === 'terminal.open') return { sessionKey: 'k1' }
+    return {}
+  })
+  try {
+    const onOk = await answeredChallenge(view)
+    await onOk()
+    assert.equal(view.calls.some(call => call.command === 'terminal.open'), true, '答完挑战要接着开终端')
+    assert.equal(view.messages.filter(m => m.type === 'error').length, 0, '正常路径不该报错')
   } finally { view.unmount() }
 })
