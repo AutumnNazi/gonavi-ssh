@@ -197,3 +197,34 @@ test("GoNavi InspectPackage rejects legacy paths and accepts the script archive"
   assert.equal(inspected.status, 0, inspected.output);
   t.diagnostic(inspected.output.trim());
 });
+
+// 用 fixture 里的假 vite 产出指定入口文档，用来验证打包期对资源路径的校验。
+// 函数声明会提升，放文件末尾也能被上面的用例调用。
+function buildEntryDocument(f, document) {
+  fs.writeFileSync(path.join(f.dir, 'frontend/node_modules/vite/bin/vite.js'),
+    'const fs = require("node:fs"); fs.mkdirSync("dist", {recursive:true});'
+    + ' fs.cpSync("public", "dist", {recursive:true});'
+    + ' fs.writeFileSync("dist/index.html", process.env.ENTRY_DOCUMENT);');
+  assert.equal(document, process.env.ENTRY_DOCUMENT);
+}
+
+test('refuses an entry document whose assets resolve outside the host asset prefix', t => {
+  // 宿主把入口文档直接放在 `/` 上返回（不再 302 到 /plugin-assets/frontend/index.html），
+  // 相对路径会解析到 /assets/...，被宿主按前缀挡掉 404：窗口白屏且没有任何提示。
+  const f = fixture(t, { ENTRY_DOCUMENT: '<script type="module" src="./assets/app.js"></script>' });
+  buildEntryDocument(f, process.env.ENTRY_DOCUMENT);
+  const result = f.build();
+  assert.notEqual(result.status, 0, 'relative asset URLs must not package');
+  assert.match(result.output, /plugin-assets/);
+  assert.equal(fs.existsSync(path.join(f.dir, 'package/frontend/index.html')), false);
+  assert.equal(fs.existsSync(f.zip), false);
+});
+
+test('refuses an entry document whose absolute assets are missing from the build', t => {
+  const f = fixture(t, { ENTRY_DOCUMENT: '<script src="/plugin-assets/frontend/assets/missing.js"></script>' });
+  buildEntryDocument(f, process.env.ENTRY_DOCUMENT);
+  const result = f.build();
+  assert.notEqual(result.status, 0, 'a dangling asset reference must not package');
+  assert.match(result.output, /不存在/);
+  assert.equal(fs.existsSync(f.zip), false);
+});

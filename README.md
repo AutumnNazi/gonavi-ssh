@@ -57,6 +57,8 @@ bash scripts/package.sh                       # 组包 → dist/*.zip
 
 组包默认读取 `gonavi.plugin.json` 的 `id` 与 `version`，v0.1.2 输出为 `dist/gh-autumnnazi.ssh-0.1.2.zip`；显式传入版本（如 `bash scripts/package.sh 0.1.2`）必须与清单一致，否则在构建与修改产物前停止。组包直接用现有 Node 执行本地 TypeScript 类型检查与 Vite 构建，失败即停止，不调用 npm 包装器，也不安装依赖。ZIP 仅包含 `bin/`、`frontend/` 和 `gonavi.plugin.json`，条目不带 `./`；重打时清除旧归档，避免残留资源。最终验收应对该 ZIP 运行宿主 `inspect`，不能只检查 `package/` 目录。
 
+入口文档 `frontend/index.html` 里的资源引用必须是 `/plugin-assets/frontend/` 下的绝对路径。宿主把入口文档直接放在 `/` 上返回（不再 302 到 `/plugin-assets/frontend/index.html`），文档里的相对路径会解析成 `/assets/...`，被宿主按前缀挡掉 404——窗口整个白屏，控制台也没有任何提示。因此 `frontend/vite.config.ts` 的 `base` 固定为 `'/plugin-assets/frontend/'`；组包在复制前端产物前逐个校验入口文档的 `src`/`href` 都指向该前缀下的真实文件，不满足即失败。
+
 设置 `GONAVI_HOST_ROOT` 为 GoNavi 源码目录后，上述测试会通过临时 Go overlay 调用真实 `InspectPackage`，验证旧 `./` 归档被拒绝、新归档与目录 digest 一致；不修改宿主源码，也不安装插件。可用 `GO_BIN`、`BASH_BIN` 指定已有工具的路径。
 
 插件运行在宿主内时，数据目录使用宿主分配的私有目录（`GONAVI_PLUGIN_DATA`）；

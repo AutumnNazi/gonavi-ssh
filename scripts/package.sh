@@ -33,6 +33,28 @@ build_backend darwin  arm64 gonavi-ssh-darwin-arm64
 
 echo "==> frontend build"
 (cd "$ROOT/frontend" && node node_modules/typescript/bin/tsc --noEmit && node node_modules/vite/bin/vite.js build)
+# 宿主把入口文档直接放在 `/` 上返回（不再 302 到 /plugin-assets/frontend/index.html），
+# 文档里的相对路径会解析到 /assets/...，被宿主按前缀挡掉 404：窗口白屏，控制台也没有任何提示。
+# 所以入口引用的资源必须是 /plugin-assets/frontend/ 下的绝对路径，且文件真实存在于构建产物里。
+ENTRY_HTML="$ROOT/frontend/dist/index.html"
+if [ ! -f "$ENTRY_HTML" ]; then
+  echo "错误：前端构建产物缺少入口文档 $ENTRY_HTML" >&2
+  exit 1
+fi
+ENTRY_REFS="$(grep -oE '(src|href)="[^"]+"' "$ENTRY_HTML" | sed -E 's/^[^"]*"//; s/"$//' || true)"
+for ref in $ENTRY_REFS; do
+  case "$ref" in
+    /plugin-assets/frontend/*) ;;
+    *)
+      echo "错误：入口文档引用了非绝对资源 $ref；宿主在 / 上返回该文档，资源必须是 /plugin-assets/frontend/ 下的绝对路径，否则 404 导致白屏" >&2
+      exit 1
+      ;;
+  esac
+  if [ ! -f "$ROOT/frontend/dist/${ref#/plugin-assets/frontend/}" ]; then
+    echo "错误：入口文档引用的资源在构建产物中不存在：$ref" >&2
+    exit 1
+  fi
+done
 cp -r "$ROOT/frontend/dist/." "$STAGE/frontend/"
 
 cp "$ROOT/gonavi.plugin.json" "$STAGE/"
