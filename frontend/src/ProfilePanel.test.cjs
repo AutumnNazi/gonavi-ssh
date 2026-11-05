@@ -27,7 +27,7 @@ function fixture(invoke = async () => ({})) {
   const form = { resetFields() {}, setFieldsValue() {}, validateFields: async () => ({}) }
   const Form = Object.assign(() => null, { useForm: () => [form], useWatch: () => 'password', Item: 'Form.Item', List: 'Form.List' })
   const components = new Proxy({ Form, message: Object.fromEntries(['error', 'success', 'warning'].map(type => [type, text => messages.push({ type, text })])) }, { get: (target, key) => target[key] ?? String(key) })
-  const output = ts.transpileModule(fs.readFileSync(path.join(__dirname, 'components/ProfilePanel.tsx'), 'utf8'), {
+  const output = ts.transpileModule(fs.readFileSync(process.env.PROFILE_PANEL_SOURCE || path.join(__dirname, 'components/ProfilePanel.tsx'), 'utf8'), {
     fileName: 'ProfilePanel.tsx', compilerOptions: { target: ts.ScriptTarget.ES2021, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
   }).outputText
   const module = { exports: {} }
@@ -66,7 +66,7 @@ function fixture(invoke = async () => ({})) {
     return node.props?.children === undefined ? undefined : find(predicate, node.props.children)
   }
   render()
-  return { props, render, find, calls, messages, refresh, unmount() { for (const effect of effects) effect?.cleanup?.() } }
+  return { props, render, find, calls, messages, refresh, form, unmount() { for (const effect of effects) effect?.cleanup?.() } }
 }
 const tick = () => new Promise(resolve => setImmediate(resolve))
 
@@ -251,5 +251,28 @@ test('selection has all/partial states and never deletes before confirmation', a
   dialog.props.onCancel()
   view.render()
   assert.equal(view.calls.length, 0)
+  view.unmount()
+})
+
+test('validation failures stay inside the dialog instead of escaping as unhandled rejections', async () => {
+  const view = fixture()
+  // antd 校验失败时 reject 的是 { errorFields, values, outOfDate } 这种普通对象，不是 Error：
+  // 处理器一旦把它丢出去，窗口就会被启动期错误面板盖成 [unhandledrejection] [object Object]。
+  view.form.validateFields = async () => { throw { values: {}, errorFields: [{ name: ['host'], errors: ['required'] }], outOfDate: false } }
+  const modals = []
+  const collect = node => {
+    if (!node || typeof node !== 'object') return
+    if (Array.isArray(node)) { for (const child of node) collect(child); return }
+    if (node.type === 'Modal') modals.push(node)
+    collect(node.props?.children)
+  }
+  collect(view.render())
+  const footer = modals.flatMap(modal => Array.isArray(modal.props.footer) ? modal.props.footer : [])
+  const test = footer.find(button => button.props.children === 'form.test')
+  const save = footer.find(button => button.props.children === 'form.save')
+  assert.ok(test && save, '测试与保存按钮必须在弹窗页脚里')
+  await assert.doesNotReject(test.props.onClick())
+  await assert.doesNotReject(save.props.onClick())
+  assert.equal(view.calls.length, 0, '校验没过就不该发起请求')
   view.unmount()
 })

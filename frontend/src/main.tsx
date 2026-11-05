@@ -8,6 +8,7 @@ import antdJaJP from 'antd/locale/ja_JP'
 import antdDeDE from 'antd/locale/de_DE'
 import antdRuRU from 'antd/locale/ru_RU'
 import App from './App'
+import { describeError } from './bridge'
 import { hostPrefs, subscribeHostPrefs, type HostPrefs } from './hostPrefs'
 import { antdLocaleKey } from './i18n'
 import './styles.css'
@@ -40,7 +41,9 @@ window.addEventListener(
 )
 window.addEventListener('unhandledrejection', e => {
   const reason = e.reason
-  showFatal('unhandledrejection', reason instanceof Error ? `${reason.message}\n${reason.stack ?? ''}` : String(reason))
+  // 插件错误是 {code,message} 这种普通对象，String(reason) 只会打成 [object Object]，
+  // 面板上就看不到真正的原因；统一走 describeError 取消息。
+  showFatal('unhandledrejection', reason instanceof Error ? `${reason.message}\n${reason.stack ?? ''}` : describeError(reason))
 })
 
 const antdLocales = {

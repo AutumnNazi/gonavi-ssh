@@ -47,7 +47,10 @@ export function SettingsPanel({ settings, onSaved }: Props) {
   }, [settings, form])
 
   const save = async () => {
-    const v = await form.validateFields()
+    // 校验没通过时 antd 已经在字段下渲染了提示：这条拒绝不能被丢成未处理的
+    // promise 拒绝（否则整个窗口会被启动期错误面板盖住），停下即可。
+    const v = await form.validateFields().catch(() => null)
+    if (!v) return
     const toList = (s: string | undefined) =>
       (s ?? '').split('\n').map(x => x.trim()).filter(Boolean)
     const next: PluginSettings = {

@@ -135,7 +135,10 @@ export function ProfilePanel({
   }
 
   const saveProfile = async () => {
-    const values = await form.validateFields()
+    // 校验没通过时 antd 已经在字段下渲染了提示：这条拒绝不能被丢成未处理的
+    // promise 拒绝（否则整个窗口会被启动期错误面板盖住），停下即可。
+    const values = await form.validateFields().catch(() => null)
+    if (!values) return
     try {
       await invokeAs('profile.save', { profile: values })
       message.success(values.id ? t('form.save') : t('form.save'))
@@ -147,7 +150,10 @@ export function ProfilePanel({
   }
 
   const testProfile = async () => {
-    const values = await form.validateFields()
+    // 校验没通过时 antd 已经在字段下渲染了提示：这条拒绝不能被丢成未处理的
+    // promise 拒绝（否则整个窗口会被启动期错误面板盖住），停下即可。
+    const values = await form.validateFields().catch(() => null)
+    if (!values) return
     setTestResult(null)
     try {
       const res = await invokeAs<{
