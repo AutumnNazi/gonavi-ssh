@@ -23,6 +23,10 @@ function run(command, args, cwd, env, log) {
   }
 }
 
+// fixture 构建出的入口文档：按真实构建的样子给——资源是宿主前缀下的绝对路径且真实存在，
+// 否则打包守卫（零引用、`..` 逃逸、资源存在性）会先把它拦掉。
+const FIXTURE_DOCUMENT = '<script type="module" src="/plugin-assets/frontend/assets/app.js"></script>';
+
 function fixture(t, extraEnv = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gonavi package test '));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -37,7 +41,7 @@ function fixture(t, extraEnv = {}) {
   fs.writeFileSync(path.join(dir, "tools/go"), "#!/usr/bin/env bash\nwhile [ \"$#\" -gt 0 ]; do if [ \"$1\" = \"-o\" ]; then shift; printf \"test backend\" > \"$1\"; exit 0; fi; shift; done\nexit 2\n", { mode: 0o755 });
   fs.writeFileSync(path.join(dir, "tools/npm"), "#!/usr/bin/env bash\nnode node_modules/typescript/bin/tsc --noEmit && node node_modules/vite/bin/vite.js build\n", { mode: 0o755 });
   fs.writeFileSync(path.join(dir, "frontend/node_modules/typescript/bin/tsc"), "const fs = require(\"node:fs\"); fs.appendFileSync(\"../build.trace\", \"tsc\\n\"); process.exit(Number(process.env.FAIL_TYPECHECK || 0));");
-  fs.writeFileSync(path.join(dir, "frontend/node_modules/vite/bin/vite.js"), "const fs = require(\"node:fs\"); fs.appendFileSync(\"../build.trace\", \"vite\\n\"); process.exitCode = Number(process.env.FAIL_VITE || 0); if (process.exitCode) process.exit(process.exitCode); fs.mkdirSync(\"dist\", {recursive:true}); fs.writeFileSync(\"dist/index.html\", \"fresh frontend\"); fs.cpSync(\"public\", \"dist\", {recursive:true});");
+  fs.writeFileSync(path.join(dir, "frontend/node_modules/vite/bin/vite.js"), "const fs = require(\"node:fs\"); fs.appendFileSync(\"../build.trace\", \"vite\\n\"); process.exitCode = Number(process.env.FAIL_VITE || 0); if (process.exitCode) process.exit(process.exitCode); fs.mkdirSync(\"dist/assets\", {recursive:true}); fs.cpSync(\"public\", \"dist\", {recursive:true}); fs.writeFileSync(\"dist/assets/app.js\", \"// bundle\"); fs.writeFileSync(\"dist/index.html\", " + JSON.stringify(FIXTURE_DOCUMENT) + ");");
   const env = { ...process.env, ...extraEnv, PATH: path.join(dir, 'tools') + path.delimiter + process.env.PATH };
   const build = (...versions) => run(bash, ['scripts/package.sh', ...versions], dir, env, path.join(dir, 'build.log'));
   const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'gonavi.plugin.json'), 'utf8'));
@@ -142,7 +146,7 @@ test("frontend build bypasses npm wrappers that report success without output", 
   fs.writeFileSync(path.join(f.dir, 'tools/npm'), "#!/usr/bin/env bash\necho \"syntax error near unexpected token\" >&2\nexit 0\n", {mode: 0o755});
   const result = f.build();
   assert.equal(result.status, 0, result.output);
-  assert.equal(fs.readFileSync(path.join(f.dir, 'package/frontend/index.html'), 'utf8'), 'fresh frontend', 'stale dist copied after npm falsely succeeded');
+  assert.equal(fs.readFileSync(path.join(f.dir, 'package/frontend/index.html'), 'utf8'), FIXTURE_DOCUMENT, 'stale dist copied after npm falsely succeeded');
   assert.equal(fs.readFileSync(path.join(f.dir, 'build.trace'), 'utf8'), "tsc\nvite\n");
 });
 
@@ -199,11 +203,14 @@ test("GoNavi InspectPackage rejects legacy paths and accepts the script archive"
 });
 
 // 用 fixture 里的假 vite 产出指定入口文档，用来验证打包期对资源路径的校验。
+// 同时在 frontend/ 下留一个 runtime.js（入口文档的同级文件），用于验证 `..`
+// 逃逸会被拦——否则逃逸路径根本指不到存在的文件，用例就验不出守卫。
 // 函数声明会提升，放文件末尾也能被上面的用例调用。
 function buildEntryDocument(f, document) {
   fs.writeFileSync(path.join(f.dir, 'frontend/node_modules/vite/bin/vite.js'),
     'const fs = require("node:fs"); fs.mkdirSync("dist", {recursive:true});'
     + ' fs.cpSync("public", "dist", {recursive:true});'
+    + ' fs.writeFileSync("runtime.js", "// 入口文档同级的文件");'
     + ' fs.writeFileSync("dist/index.html", process.env.ENTRY_DOCUMENT);');
   assert.equal(document, process.env.ENTRY_DOCUMENT);
 }
@@ -226,5 +233,25 @@ test('refuses an entry document whose absolute assets are missing from the build
   const result = f.build();
   assert.notEqual(result.status, 0, 'a dangling asset reference must not package');
   assert.match(result.output, /不存在/);
+  assert.equal(fs.existsSync(f.zip), false);
+});
+
+test('refuses an entry document that references no asset at all', t => {
+  // 零引用的入口文档不可能是能跑起来的界面：与其打出一个必然白屏的包，不如直接失败。
+  const f = fixture(t, { ENTRY_DOCUMENT: '<div id="root"></div>' });
+  buildEntryDocument(f, process.env.ENTRY_DOCUMENT);
+  const result = f.build();
+  assert.notEqual(result.status, 0, 'an entry document without any asset must not package');
+  assert.match(result.output, /没有任何/);
+  assert.equal(fs.existsSync(f.zip), false);
+});
+
+test('refuses an entry document whose asset path escapes the prefix with ..', t => {
+  // /plugin-assets/frontend/../runtime.js 能过前缀匹配，指到的却是前缀之外的文件。
+  const f = fixture(t, { ENTRY_DOCUMENT: '<script src="/plugin-assets/frontend/../runtime.js"></script>' });
+  buildEntryDocument(f, process.env.ENTRY_DOCUMENT);
+  const result = f.build();
+  assert.notEqual(result.status, 0, 'a path escaping the asset prefix must not package');
+  assert.match(result.output, /逃出资源前缀/);
   assert.equal(fs.existsSync(f.zip), false);
 });

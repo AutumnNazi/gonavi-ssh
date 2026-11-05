@@ -42,6 +42,10 @@ if [ ! -f "$ENTRY_HTML" ]; then
   exit 1
 fi
 ENTRY_REFS="$(grep -oE '(src|href)="[^"]+"' "$ENTRY_HTML" | sed -E 's/^[^"]*"//; s/"$//' || true)"
+if [ -z "$ENTRY_REFS" ]; then
+  echo "错误：入口文档 $ENTRY_HTML 没有任何 src/href 资源引用，这样的包打出来必然白屏" >&2
+  exit 1
+fi
 for ref in $ENTRY_REFS; do
   case "$ref" in
     /plugin-assets/frontend/*) ;;
@@ -50,7 +54,15 @@ for ref in $ENTRY_REFS; do
       exit 1
       ;;
   esac
-  if [ ! -f "$ROOT/frontend/dist/${ref#/plugin-assets/frontend/}" ]; then
+  REL="${ref#/plugin-assets/frontend/}"
+  # 前缀匹配挡不住 /plugin-assets/frontend/../x：它指到的是前缀之外的文件。
+  case "/$REL/" in
+    */../*)
+      echo "错误：入口文档引用的资源路径含 .. 段，会逃出资源前缀：$ref" >&2
+      exit 1
+      ;;
+  esac
+  if [ ! -f "$ROOT/frontend/dist/$REL" ]; then
     echo "错误：入口文档引用的资源在构建产物中不存在：$ref" >&2
     exit 1
   fi
