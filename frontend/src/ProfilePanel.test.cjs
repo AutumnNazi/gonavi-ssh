@@ -276,3 +276,4 @@ test('validation failures stay inside the dialog instead of escaping as unhandle
   assert.equal(view.calls.length, 0, '校验没过就不该发起请求')
   view.unmount()
 })
+

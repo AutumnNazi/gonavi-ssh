@@ -125,7 +125,16 @@ body[data-background-image="true"] .app-root {
   height: 100%;
 }
 
+/* 终端页：左侧文件浏览 + 右侧终端，文件浏览收起时只剩终端一栏。 */
 .terminals-wrap {
+  height: 100%;
+  display: flex;
+  flex-direction: row;
+}
+
+.terminals-main {
+  flex: 1;
+  min-width: 0;
   height: 100%;
   display: flex;
   flex-direction: column;
@@ -289,6 +298,13 @@ body[data-background-image="true"] .app-root {
 .conn-card-links a {
   font-size: 12px;
   margin-left: 10px;
+}
+
+/* 批量删除进行中时这些链接不可用：光给 aria-disabled 只有屏幕阅读器知道，
+   还得看得见、点不动。 */
+.conn-card-links a[aria-disabled="true"] {
+  opacity: 0.45;
+  pointer-events: none;
 }
 
 .profile-addr {
@@ -561,6 +577,136 @@ body[data-background-image="true"] .app-root {
 
 .path-edit:hover {
   color: var(--accent);
+}
+
+/* 终端页左侧的远端文件浏览：定宽、可整块收起（收起即写回 showFileTree 设置）。 */
+.file-tree {
+  flex: none;
+  width: 260px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 8px 6px;
+  border-right: 1px solid var(--border);
+  background: var(--toolbar-bg);
+  overflow: hidden;
+}
+
+.file-tree-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+/* 面包屑在「文件」页是横向工具栏里占剩余宽度用的 flex:1；到了纵向排列的文件
+   浏览面板里，同一句会变成"占剩余高度"，把面包屑自己撑成一大块空白、把列表
+   挤到面板下半截。这里按内容高度收住。 */
+.file-tree .path-breadcrumb {
+  flex: none;
+}
+
+/* 跟随终端时目录由终端决定：面包屑照常显示，但层级点不动，也不必装作能点。 */
+.path-breadcrumb[aria-disabled="true"] a,
+.crumb.root[aria-disabled="true"] {
+  pointer-events: none;
+  opacity: 0.6;
+}
+
+.file-tree-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--toolbar-fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-tree-hint {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 0 12px;
+  color: var(--meta-fg);
+  font-size: 12px;
+}
+
+.file-tree-foot {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--meta-fg);
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+/* 操作按钮单独占一行：七个图标挤在标题旁边会连成一片，认不出哪个是哪个。 */
+.file-tree-tools {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* 下载投放区：把上面的条目拖进来就下到这个目录。虚线框 + 拖动经过时的高亮
+   是给用户看的"这里能接住东西"，否则没人会想到拖进来。 */
+.fs-drop {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.fs-drop:hover {
+  background: var(--selected-bg);
+  border-color: var(--meta-fg);
+}
+
+.fs-drop-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.fs-icon {
+  flex: none;
+  width: 16px;
+  text-align: center;
+  font-size: 12px;
+}
+
+.fs-time {
+  flex: none;
+  color: var(--meta-fg);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.fs-up .fs-name {
+  color: var(--meta-fg);
+}
+
+/* 跟随终端时「..」进不去：得看起来就像进不去，别让用户双击半天没反应。 */
+.fs-up.fs-locked {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.fs-more {
+  display: flex;
+  justify-content: center;
+  padding: 2px 0;
 }
 
 .fs-scroll {

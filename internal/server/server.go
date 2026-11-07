@@ -38,6 +38,9 @@ const maxWaitMillis = 25000
 
 // App 汇集插件全部运行时状态。
 type App struct {
+	// dataDir 插件私有数据目录：「用本机程序打开」抓下来的远端文件落在它的
+	// opened/ 下，和设置、档案同处一地，进程退出也不会跑到别处去。
+	dataDir   string
 	profiles  *profile.Store
 	conns     *sshclient.Manager
 	terms     *terminal.Manager
@@ -63,6 +66,7 @@ func New(dataDir string) (*App, error) {
 	}
 	sftpMgr := sftpops.NewManager()
 	app := &App{
+		dataDir:   dataDir,
 		profiles:  store,
 		conns:     conns,
 		settings:  st,
@@ -87,42 +91,46 @@ func (a *App) readOnly() bool { return a.settings.Get().ReadOnly }
 
 // command 是命令表条目：write 为 true 的命令在只读模式下被拒绝。
 type command struct {
-	id      string
-	write   bool
-	handler goplugin.Handler
+	id string
+	// readOnlyBlocked 标记"只读模式下直接拒绝"的命令。只读模式的定位是限制
+	// AI Agent 执行任意命令的能力，不是把插件锁成砖头——人工通道（连接、终端、
+	// 文件、档案）一律不受它影响，所以表里几乎没有命令落在这一档上。
+	// Agent 的 exec 系列连静态 gate 都不走，由 settings 的巡检白名单在 handler
+	// 内动态判定（见 server_agent.go）。
+	readOnlyBlocked bool
+	handler         goplugin.Handler
 }
 
-// Handlers 返回命令注册表：每条命令带效果标注，写命令在只读模式下拒绝。
+// Handlers 返回命令注册表。只读模式只作用于 Agent 通道：人工怎么用都不受影响。
 func (a *App) Handlers() map[string]goplugin.Handler {
 	table := []command{
-		// profile
+		// profile：档案的增删改是人工操作。
 		{"profile.list", false, a.profileList},
-		{"profile.save", true, a.profileSave},
-		{"profile.delete", true, a.profileDelete},
+		{"profile.save", false, a.profileSave},
+		{"profile.delete", false, a.profileDelete},
 		{"profile.test", false, a.profileTest},
-		{"profile.importFromGonavi", true, a.profileImport},
+		{"profile.importFromGonavi", false, a.profileImport},
 		// settings
 		{"settings.get", false, a.settingsGet},
 		// settings.set 不走只读 gate：否则只读一旦开启就无法关闭。
 		// 环境变量强制只读的场景由 settings.Store 自行拒绝关闭。
 		{"settings.set", false, a.settingsSet},
-		// conn（两段式连接）
-		{"conn.open", true, a.connOpen},
-		{"conn.answer", true, a.connAnswer},
-		// 清理类命令在只读模式下放行（无远端副作用）。
+		// conn：建立连接与应答认证是人工的实时操作。
+		{"conn.open", false, a.connOpen},
+		{"conn.answer", false, a.connAnswer},
+		// 清理类命令（无远端副作用）。
 		{"conn.cancel", false, a.connCancel},
 		{"conn.status", false, a.connStatus},
 		{"conn.close", false, a.connClose},
-		// 清理命令：只读模式下也必须放行（无远端副作用），否则关窗后
-		// 连接会残留到进程退出。
+		// 关窗清理：必须放行，否则连接会残留到进程退出。
 		{"session.teardown", false, a.sessionTeardown},
-		// terminal
-		{"terminal.open", true, a.terminalOpen},
-		{"terminal.write", true, a.terminalWrite},
-		{"terminal.writeMulti", true, a.terminalWriteMulti},
+		// terminal：终端是人工手打的通道，用户自己敲的命令由他自己负责。
+		{"terminal.open", false, a.terminalOpen},
+		{"terminal.write", false, a.terminalWrite},
+		{"terminal.writeMulti", false, a.terminalWriteMulti},
 		{"terminal.read", false, a.terminalRead},
 		{"terminal.readMulti", false, a.terminalReadMulti},
-		{"terminal.resize", true, a.terminalResize},
+		{"terminal.resize", false, a.terminalResize},
 		{"terminal.close", false, a.terminalClose},
 		{"terminal.list", false, a.terminalList},
 		{"terminal.history", false, a.terminalHistory},
@@ -133,11 +141,11 @@ func (a *App) Handlers() map[string]goplugin.Handler {
 	handlers := make(map[string]goplugin.Handler, len(table))
 	for _, c := range table {
 		h := c.handler
-		if c.write {
+		if c.readOnlyBlocked {
 			id := c.id
 			h = func(ctx context.Context, raw json.RawMessage) (any, error) {
 				if a.readOnly() {
-					return nil, appErr(errReadOnly, "plugin is in read-only mode: "+id+" is a write command")
+					return nil, appErr(errReadOnly, "plugin is in read-only mode: "+id+" is not available")
 				}
 				return c.handler(ctx, raw)
 			}

@@ -20,9 +20,18 @@ type QuickCommand struct {
 	Command string `json:"command"`
 }
 
+// TreeCommand 是一条「终端命令 → 目录」跳转映射：在终端里整行输入
+// Name 并回车，文件树跳到 Path。命令本身照常发给远端执行。
+type TreeCommand struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
 // Settings 是插件全部可持久化配置。
 type Settings struct {
-	// ReadOnly 开启后所有写效果命令（写文件/改目录/exec 等）一律拒绝。
+	// ReadOnly 只限制 AI Agent 通道：Agent 除巡检白名单（ReadOnlyExecAllowlist）
+	// 外不能执行命令，后台长任务（agent.runBg）直接拒绝。人工操作——连接、
+	// 终端、文件、档案——一律不受影响。
 	ReadOnly bool `json:"readOnly"`
 	// ReadOnlyExecAllowlist：只读模式下仍放行的 agent.exec 命令前缀
 	//（巡检类只读命令，如 uptime/free -m），对齐"只读连接可跑巡检"语义。
@@ -40,6 +49,19 @@ type Settings struct {
 	// CwdFollow：目录跟随。开启后新终端自动注入 OSC7 上报钩子
 	//（bash/zsh），文件面板跟随终端 cd。nil（未配置）视为关闭。
 	CwdFollow *bool `json:"cwdFollow,omitempty"`
+	// LocalEcho：终端本地预测回显。开启后按键先本地画上屏，远端回显
+	// 回来再逐字节抵消；判定与抵消都在前端（见 frontend/src/terminalEcho.ts），
+	// 后端只负责存取。nil（未配置）视为关闭。
+	LocalEcho *bool `json:"localEcho,omitempty"`
+	// ShowFileTree：在终端页左侧显示远端文件浏览。前端负责渲染与懒加载，
+	// 后端只负责存取。nil（未配置）视为关闭。
+	ShowFileTree *bool `json:"showFileTree,omitempty"`
+	// TreeCommands：终端命令 → 目录的跳转映射。在终端里整行输入 Name
+	// 并回车时，文件树跳到 Path（识别在前端，见 terminalCommandJump.ts）。
+	TreeCommands []TreeCommand `json:"treeCommands,omitempty"`
+	// DownloadDir：文件浏览面板下载文件的落地目录（宿主原生目录选择器挑定）。
+	// nil（未配置）＝还没挑过；指向空串＝用户主动清掉了。
+	DownloadDir *string `json:"downloadDir,omitempty"`
 	// HistoryLimit 每会话命令历史保留条数；HistoryEnabled=nil（未配置）
 	// 视为开启，显式 false 完全不记录。指针用于区分"未设置"与"显式关闭"。
 	HistoryLimit   int   `json:"historyLimit"`
@@ -51,6 +73,12 @@ func (s Settings) HistoryOn() bool { return s.HistoryEnabled == nil || *s.Histor
 
 // CwdFollowOn 报告目录跟随是否启用（未配置视为关）。
 func (s Settings) CwdFollowOn() bool { return s.CwdFollow != nil && *s.CwdFollow }
+
+// LocalEchoOn 报告本地回显是否启用（未配置视为关）。
+func (s Settings) LocalEchoOn() bool { return s.LocalEcho != nil && *s.LocalEcho }
+
+// ShowFileTreeOn 报告终端页是否显示文件浏览（未配置视为关）。
+func (s Settings) ShowFileTreeOn() bool { return s.ShowFileTree != nil && *s.ShowFileTree }
 
 // Default 返回缺省配置。
 func Default() Settings {
@@ -156,6 +184,18 @@ func (s *Store) Update(next Settings) error {
 	}
 	if next.CwdFollow == nil {
 		next.CwdFollow = s.current.CwdFollow
+	}
+	if next.LocalEcho == nil {
+		next.LocalEcho = s.current.LocalEcho
+	}
+	if next.ShowFileTree == nil {
+		next.ShowFileTree = s.current.ShowFileTree
+	}
+	if next.TreeCommands == nil {
+		next.TreeCommands = s.current.TreeCommands
+	}
+	if next.DownloadDir == nil {
+		next.DownloadDir = s.current.DownloadDir
 	}
 	next = mergeDefaults(next)
 	s.current = next

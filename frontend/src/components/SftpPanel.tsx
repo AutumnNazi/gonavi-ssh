@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Button,
+  Dropdown,
   Input,
   List,
   message,
@@ -28,9 +29,12 @@ import {
   SwapOutlined,
 } from '@ant-design/icons'
 import { invokeAs, describeError } from '../bridge'
-import { decodeText, encodeText } from '../b64'
+import { copyToClipboard } from '../clipboard'
+import { FilePreviewModal } from './FilePreviewModal'
+import { fmtBytes, joinLocal, joinRemote } from '../fsFormat'
 import { t } from '../i18n'
 import type { ConnectionInfo, FsEntry, ProfileView, TransferStatus } from '../types'
+import { PathBreadcrumb } from './PathBreadcrumb'
 import { createPaneRequests, type PaneScope } from './sftpRequests'
 
 type Side = 'left' | 'right'
@@ -41,77 +45,11 @@ interface Props {
   connections: ConnectionInfo[]
   onConnectionsChanged: () => void
   initialRemotePath?: string | null
+  /** 在活动终端里 cd 到此远端目录（没有可用终端时由上层提示）。 */
+  onCdTo?: (remotePath: string) => void
 }
 
-const BACKSLASH = String.fromCharCode(92)
 const CONNECT_WAIT_MS = 20000
-
-function fmtBytes(n: number): string {
-  if (n >= 1 << 30) return (n / (1 << 30)).toFixed(1) + ' GB'
-  if (n >= 1 << 20) return (n / (1 << 20)).toFixed(1) + ' MB'
-  if (n >= 1 << 10) return (n / (1 << 10)).toFixed(1) + ' KB'
-  return n + ' B'
-}
-
-function splitPathSegments(path: string, homeHint?: boolean): { label: string; full: string }[] {
-  if (!path) return []
-  if (path === '.' || path === './') return [{ label: homeHint ? '~' : '.', full: '.' }]
-  const win = /^[a-zA-Z]:[\\/]/.test(path) || /^[a-zA-Z]:$/.test(path)
-  if (win) {
-    const norm = path.split('/').join(BACKSLASH).replace(/[\\]+$/, '')
-    const out: { label: string; full: string }[] = []
-    let acc = ''
-    for (const part of norm.split(BACKSLASH).filter(Boolean)) {
-      acc = acc === '' ? part + BACKSLASH : acc.replace(/[\\]+$/, '') + BACKSLASH + part
-      out.push({ label: part, full: acc })
-    }
-    return out
-  }
-  if (path.startsWith(BACKSLASH + BACKSLASH)) {
-    const out: { label: string; full: string }[] = []
-    let acc = BACKSLASH + BACKSLASH
-    for (const part of path.split(/[\\/]/).filter(Boolean)) {
-      acc = acc === BACKSLASH + BACKSLASH ? acc + part : acc + BACKSLASH + part
-      out.push({ label: part, full: acc })
-    }
-    return out
-  }
-  const out: { label: string; full: string }[] = [{ label: '/', full: '/' }]
-  let acc = ''
-  for (const part of path.split('/').filter(Boolean)) {
-    acc += '/' + part
-    out.push({ label: part, full: acc })
-  }
-  return out
-}
-
-function PathBreadcrumb({
-  path,
-  emptyLabel,
-  homeHint,
-  onNavigate,
-}: {
-  path: string
-  emptyLabel?: string
-  homeHint?: boolean
-  onNavigate: (p: string) => void
-}) {
-  const segs = splitPathSegments(path, homeHint)
-  if (segs.length === 0) {
-    return <span className="crumb root" onClick={() => onNavigate('')}>{emptyLabel ?? '—'}</span>
-  }
-  return (
-    <div className="path-breadcrumb">
-      {segs.map((seg, i) => (
-        <span key={i} className="crumb">
-          <span className="crumb-icon">📁</span>
-          <a title={seg.full} onClick={() => onNavigate(seg.full)}>{seg.label}</a>
-          {i < segs.length - 1 && <span className="crumb-sep">›</span>}
-        </span>
-      ))}
-    </div>
-  )
-}
 
 // 一栏的浏览历史（index 用 ref，reset 用于切换本机/服务器时清空）。
 function useNavHistory() {
@@ -148,7 +86,7 @@ function useNavHistory() {
   return { push, reset, back, forward, canBack, canForward }
 }
 
-export function SftpPanel({ profiles, connections, onConnectionsChanged, initialRemotePath }: Props) {
+export function SftpPanel({ profiles, connections, onConnectionsChanged, initialRemotePath, onCdTo }: Props) {
   // 对称双栏：左默认本机、右默认服务器（符合常见 FTP 客户端习惯）。
   const [leftKind, setLeftKind] = useState<PaneKind>('local')
   const [leftProfileId, setLeftProfileId] = useState('')
@@ -172,9 +110,9 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
   const rightNav = useNavHistory()
 
   const [transfers, setTransfers] = useState<TransferStatus[]>([])
-  const [preview, setPreview] = useState<{ path: string; content: string; dirty: string; side: Side; scope: PaneScope; token: number; truncated: boolean } | null>(null)
-  const previewRequest = useRef(0)
-  const previewSaving = useRef<number | null>(null)
+  // 预览交给公共组件（filePreview 只留"打开的是哪一个"）。side 记下来是为了
+  // 保存后能刷新对应那一栏的大小/时间。
+  const [previewTarget, setPreviewTarget] = useState<{ connectionId: string; path: string; name: string; side: Side } | null>(null)
   const [du, setDu] = useState<{ side: Side; text: string; scope: PaneScope } | null>(null)
   const paneRequests = useRef({ left: createPaneRequests(), right: createPaneRequests() })
   const entryScopes = useRef<Record<Side, PaneScope>>({ left: { epoch: -1 }, right: { epoch: -1 } })
@@ -195,7 +133,6 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
     paneRequests.current.left.invalidate()
     paneRequests.current.right.invalidate()
     duRequest.current.left++; duRequest.current.right++
-    previewRequest.current++
   }, [])
 
   const profileOptions = useMemo(
@@ -406,10 +343,11 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
   }, [])
 
   // 把 from 栏选中项送到对侧：本地↔远端 / 远端↔远端。
-  const sendToPeer = async (from: Side, scope: PaneScope) => {
+  // override 供右键菜单用：它作用于鼠标下的那一行，而不是（可能还没更新的）选中项。
+  const sendToPeer = async (from: Side, scope: PaneScope, override?: FsEntry) => {
     if (peerSame) { message.warning(t('sftp.peerSame')); return }
     if (!paneRequests.current[from].source(scope)) return
-    const srcSel = from === 'left' ? leftSel : rightSel
+    const srcSel = override ?? (from === 'left' ? leftSel : rightSel)
     const srcKind = from === 'left' ? leftKind : rightKind
     const dstKind = from === 'left' ? rightKind : leftKind
     const srcConn = from === 'left' ? leftConn : rightConn
@@ -476,52 +414,29 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
     }
   }
 
-  const doPreview = async (entry: FsEntry, side: Side, scope: PaneScope) => {
-    const requests = paneRequests.current[side]
-    if (!requests.source(scope)) return
-    const conn = side === 'left' ? leftConn : rightConn
-    const kind = side === 'left' ? leftKind : rightKind
-    if (kind === 'remote' && !conn) return
-    if (kind === 'local') return // 本地不提供预览编辑（避免误改本机文件）
-    const token = ++previewRequest.current
-    const current = () => token === previewRequest.current && requests.source(scope)
-    setPreview(null)
-    try {
-      const res = await invokeAs<{ dataBase64: string; truncated?: boolean }>('sftp.preview', {
-        connectionId: conn!.connectionId, path: entry.path, maxBytes: 262144,
-      })
-      if (!current()) return
-      const text = decodeText(res.dataBase64)
-      const nul = [...text].filter(c => c === '\u0000').length
-      if (nul > text.length / 100) {
-        message.warning(`${entry.name}: binary`)
-        return
-      }
-      setPreview({ path: entry.path, content: text, dirty: text, side, scope, token, truncated: !!res.truncated })
-    } catch (e) {
-      if (current()) message.error(describeError(e))
+  // 双击与右键「打开」都走这里：目录进目录，远端文件交给公共预览弹窗。
+  const openEntry = (entry: FsEntry, side: Side, scope: PaneScope) => {
+    if (!paneRequests.current[side].source(scope)) return
+    if (entry.isDir) {
+      openSide(side, entry.path)
+      return
     }
+    const conn = side === 'left' ? leftConn : rightConn
+    // 本地栏不做预览编辑：那是用户自己的文件，不该从插件里改。
+    if (side === 'left' || !conn) return
+    setPreviewTarget({ connectionId: conn.connectionId, path: entry.path, name: entry.name, side })
   }
 
-  const savePreview = async () => {
-    if (!preview || preview.token !== previewRequest.current || previewSaving.current === preview.token || !paneRequests.current[preview.side].source(preview.scope)) return
-    const conn = preview.side === 'left' ? leftConn : rightConn
-    if (!conn) return
-    const token = preview.token
-    const current = () => token === previewRequest.current && paneRequests.current[preview.side].source(preview.scope)
-    previewSaving.current = token
+  // 用本机程序打开：后端把文件取到插件数据目录再唤起系统默认程序。改动不会
+  // 自动回写，要上传由用户显式做——顺手存一下就覆盖远端太危险。
+  const openExternal = async (entry: FsEntry, side: Side) => {
+    const conn = side === 'left' ? leftConn : rightConn
+    if (side === 'left' || !conn || entry.isDir) return
     try {
-      await invokeAs('sftp.writeFile', {
-        connectionId: conn.connectionId, path: preview.path, dataBase64: encodeText(preview.dirty),
-      })
-      if (!current()) return
-      previewRequest.current++
-      message.success(t('sftp.saveFile'))
-      setPreview(null)
+      await invokeAs('sftp.openExternal', { connectionId: conn.connectionId, path: entry.path })
+      message.success(t('sftp.openExternalStarted', { name: entry.name }))
     } catch (e) {
-      if (current()) message.error(describeError(e))
-    } finally {
-      if (previewSaving.current === token) previewSaving.current = null
+      message.error(describeError(e))
     }
   }
 
@@ -565,15 +480,7 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
     }
   }
 
-  const copyPath = async (path: string) => {
-    if (!path) return
-    try {
-      await navigator.clipboard.writeText(path)
-      message.success(`${t('sftp.copyPath')}: ${path}`)
-    } catch {
-      message.warning(path)
-    }
-  }
+  const copyPath = (path: string) => void copyToClipboard(path, t('sftp.copyPath'))
 
   if (profiles.length === 0) {
     return <div className="empty-hint">{t('sftp.noProfiles')}</div>
@@ -668,23 +575,23 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
               title={t('sftp.forward')} onClick={() => navSide(side, 'forward')} />
             <Button size="small" icon={<RollbackOutlined />} title={t('sftp.parent')}
               onClick={() => openSide(side, isLocal ? parentLocal(path) : parentRemote(path))} />
-            <Button size="small" icon={<ReloadOutlined />} title={t('sftp.refresh')}
+            <Button size="small" icon={<ReloadOutlined />} title={t('sftp.refresh')} aria-label={t('sftp.refresh')}
               onClick={() => { if (requests.matches([kind, profileId, conn?.connectionId ?? '', path])) void loadSide(side, path, 0) }} />
             {!isLocal && (
               <>
-                <Button size="small" icon={<FolderAddOutlined />} title={t('sftp.mkdir')}
+                <Button size="small" icon={<FolderAddOutlined />} title={t('sftp.mkdir')} aria-label={t('sftp.mkdir')}
                   onClick={async () => {
                     const name = await simplePrompt(t('sftp.mkdir'))
                     if (name) await remoteAction(side, 'sftp.mkdir', { path: joinRemote(path, name) }, scope)
                   }} />
-                <Button size="small" icon={<DeleteOutlined />} title={t('sftp.remove')} danger
+                <Button size="small" icon={<DeleteOutlined />} title={t('sftp.remove')} aria-label={t('sftp.remove')} danger
                   disabled={!sel}
                   onClick={async () => {
                     if (!sel || !requests.source(sourceScope)) return
                     if (sel.isDir) await remoteAction(side, 'sftp.removeRecursive', { path: sel.path }, sourceScope)
                     else await remoteAction(side, 'sftp.remove', { path: sel.path }, sourceScope)
                   }} />
-                <Button size="small" icon={<DashboardOutlined />} title={t('sftp.du')}
+                <Button size="small" icon={<DashboardOutlined />} title={t('sftp.du')} aria-label={t('sftp.du')}
                   onClick={() => showDu(side, scope)} disabled={!conn} />
               </>
             )}
@@ -750,23 +657,59 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
             className="fs-list"
             dataSource={entries}
             renderItem={e => (
-              <List.Item
-                className={`fs-item ${sel?.path === e.path ? 'fs-selected' : ''}`}
-                onClick={() => {
-                  if (!requests.source(sourceScope)) return
-                  if (side === 'left') setLeftSel(e)
-                  else setRightSel(e)
-                }}
-                onDoubleClick={() => {
-                  if (!requests.source(sourceScope)) return
-                  if (e.isDir) openSide(side, e.path)
-                  else if (!isLocal) void doPreview(e, side, sourceScope)
+              <Dropdown
+                key={e.path}
+                trigger={['contextMenu']}
+                menu={{
+                  // 按"本地还是远端""文件还是目录"裁剪：菜单里出现点不动的项，
+                  // 比干脆不出现更让人困惑。
+                  items: [
+                    ...(e.isDir ? [] : [
+                      { key: 'preview', label: t('sftp.preview'), disabled: isLocal },
+                      { key: 'external', label: t('sftp.openExternal'), disabled: isLocal },
+                      { key: 'send', label: isLocal ? t('sftp.upload') : t('sftp.sendToPeer') },
+                    ]),
+                    ...(isLocal ? [] : [
+                      ...(e.isDir ? [{ key: 'cd', label: t('sftp.cdHere') }] : []),
+                      { key: 'remove', label: t('sftp.remove'), danger: true },
+                    ]),
+                    { key: 'copyPath', label: t('sftp.copyPath') },
+                  ],
+                  onClick: ({ key }) => {
+                    if (!requests.source(sourceScope)) return
+                    if (key === 'copyPath') { copyPath(e.path); return }
+                    if (key === 'preview') { openEntry(e, side, sourceScope); return }
+                    if (key === 'external') { void openExternal(e, side); return }
+                    if (key === 'send') {
+                      if (side === 'left') setLeftSel(e)
+                      else setRightSel(e)
+                      void sendToPeer(side, sourceScope, e)
+                      return
+                    }
+                    if (key === 'cd') { onCdTo?.(e.path); return }
+                    if (key === 'remove') {
+                      void remoteAction(side, e.isDir ? 'sftp.removeRecursive' : 'sftp.remove', { path: e.path }, sourceScope)
+                    }
+                  },
                 }}
               >
-                <span className="fs-icon">{e.isDir ? '📁' : e.isLink ? '🔗' : '📄'}</span>
-                <span className="fs-name" title={e.name}>{e.name}</span>
-                <span className="fs-meta">{e.isDir ? '' : fmtBytes(e.size)}</span>
-              </List.Item>
+                <List.Item
+                  className={`fs-item ${sel?.path === e.path ? 'fs-selected' : ''}`}
+                  onClick={() => {
+                    if (!requests.source(sourceScope)) return
+                    if (side === 'left') setLeftSel(e)
+                    else setRightSel(e)
+                  }}
+                  onDoubleClick={() => {
+                    if (!requests.source(sourceScope)) return
+                    openEntry(e, side, sourceScope)
+                  }}
+                >
+                  <span className="fs-icon">{e.isDir ? '📁' : e.isLink ? '🔗' : '📄'}</span>
+                  <span className="fs-name" title={e.name}>{e.name}</span>
+                  <span className="fs-meta">{e.isDir ? '' : fmtBytes(e.size)}</span>
+                </List.Item>
+              </Dropdown>
             )}
             footer={
               more ? (
@@ -838,35 +781,19 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
         </div>
       </div>
 
-      <Modal
-        title={`${t('sftp.preview')}: ${preview?.path ?? ''}`}
-        open={preview !== null && paneRequests.current[preview.side].source(preview.scope)}
-        onCancel={() => { previewRequest.current++; setPreview(null) }}
-        onOk={savePreview}
-        okText={t('sftp.saveFile')}
-        okButtonProps={{ disabled: !!preview?.truncated }}
-        width={760}
-      >
-        {preview?.truncated && (
-          <div style={{ color: '#faad14', fontSize: 12, marginBottom: 8 }}>
-            {t('sftp.previewTruncated')}
-          </div>
-        )}
-        <Input.TextArea
-          rows={20}
-          value={preview?.dirty ?? ''}
-          onChange={e => setPreview(p => (p ? { ...p, dirty: e.target.value } : p))}
-          style={{ fontFamily: 'Consolas, monospace' }}
-          readOnly={!!preview?.truncated}
-        />
-      </Modal>
+      <FilePreviewModal
+        target={previewTarget}
+        onClose={() => setPreviewTarget(null)}
+        onSaved={target => {
+          // 内容改过，列表上的大小与时间就旧了：刷一下它所在那一栏。
+          const path = target.side === 'left' ? leftPath : rightPath
+          if (paneRequests.current[target.side].current(entryScopes.current[target.side])) {
+            void loadSide(target.side, path, 0)
+          }
+        }}
+      />
     </div>
   )
-}
-
-function joinRemote(dir: string, name: string): string {
-  if (!dir || dir === '.') return name
-  return dir.replace(/\/+$/, '') + '/' + name
 }
 
 function parentRemote(path: string): string {
@@ -874,12 +801,6 @@ function parentRemote(path: string): string {
   const idx = path.replace(/\/+$/, '').lastIndexOf('/')
   if (idx <= 0) return '/'
   return path.slice(0, idx)
-}
-
-function joinLocal(dir: string, name: string): string {
-  if (!dir) return name
-  const sep = dir.includes('\\') && !dir.includes('/') ? '\\' : '/'
-  return dir.replace(/[\\/]+$/, '') + sep + name
 }
 
 function parentLocal(path: string): string {

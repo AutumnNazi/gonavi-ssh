@@ -13,7 +13,14 @@ function loadTs(file, globals = {}) {
     compilerOptions: { target: ts.ScriptTarget.ES2021, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
   }).outputText
   const module = { exports: {} }
-  vm.runInNewContext(output, { module, exports: module.exports, AbortController, setTimeout, clearTimeout, ...globals }, { filename: file })
+  vm.runInNewContext(output, {
+    module, exports: module.exports, AbortController, setTimeout, clearTimeout,
+    // 浏览器里 requestAnimationFrame 恒存在，vm 环境没有：补一个走 setTimeout
+    // 的等价物，否则组件里"延后到下一帧"的代码在这里会直接抛错。
+    requestAnimationFrame: cb => setTimeout(() => cb(Date.now()), 0),
+    cancelAnimationFrame: id => clearTimeout(id),
+    ...globals,
+  }, { filename: file })
   return module.exports
 }
 
@@ -699,6 +706,16 @@ function terminalView(write, clipboard = { writeText: async () => {} }, initialP
       if (name === '@xterm/xterm') return { Terminal }
       if (name === '@xterm/addon-fit') return { FitAddon }
       if (name === '../terminalWriteQueue') return { createTerminalWriteQueue }
+      // 本地预测回显在这套用例里用冻结时钟加载：这些用例断言的是写队列、
+      // 读取中枢与提示层，不涉及回显；时钟停在 0 时静默窗口不满足，预测
+      // 始终不落笔，终端内容与旧口径完全一致。回显接线另有
+      // components/TerminalView.test.cjs 专门覆盖。
+      if (name === '../terminalEcho') return loadTs(path.join(__dirname, 'terminalEcho.ts'), { Date: { now: () => 0 } })
+      // 回显消除同理：本套用例不开目录跟随，没有注入，也就没有回显要剥。
+      if (name === '../terminalRedact') return loadTs(path.join(__dirname, 'terminalRedact.ts'))
+      // 输入行状态机是纯函数，直接加载生产模块：本套用例没有配跳转映射，
+      // 命不中任何命令，不介入这里的队列与提示断言。
+      if (name === '../terminalCommandJump') return loadTs(path.join(__dirname, 'terminalCommandJump.ts'))
       if (name === '../terminalReadHub') return terminalReadHub
       if (name === '../bridge') return { invokeAs, describeError: String }
       if (name === '../b64') return b64
@@ -711,7 +728,15 @@ function terminalView(write, clipboard = { writeText: async () => {} }, initialP
   function render(sessionKey = 'session') {
     cursor = 0
     currentSessionKey = sessionKey
-    rendered = exports.TerminalView({ tab: { sessionKey, connectionId: 'connection', tabKey: 'tab' }, allTabs: [], onCwd() {} })
+    rendered = exports.TerminalView({
+      tab: { sessionKey, connectionId: 'connection', tabKey: 'tab' },
+      allTabs: [],
+      onCwd() {},
+      // 设置项由上层推下来（终端不再自己去拉）：本套用例只用到快捷命令；
+      // localEcho 不传＝按开启处理，与旧口径一致。
+      quickCommands: settings.quickCommands ?? [],
+      treeCommands: settings.treeCommands ?? [],
+    })
     for (const run of pending.splice(0)) run()
     return terminals.at(-1).input
   }

@@ -35,6 +35,9 @@ window.addEventListener(
       showFatal('resource', `${(target as HTMLScriptElement).src}`)
       return
     }
+    // ResizeObserver 这条是浏览器的良性告警：观察回调里的同步布局变更会在下一帧
+    // 再触发一次。窗口最大化/还原时必现，不代表出错——更不能拿它盖住整个窗口。
+    if (/ResizeObserver loop/i.test(e.message ?? '')) return
     showFatal('error', `${e.message}\n${e.filename ?? ''}:${e.lineno ?? ''}`)
   },
   true,

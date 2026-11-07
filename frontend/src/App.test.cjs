@@ -69,6 +69,9 @@ function fixture(invoke = async () => ({ tasks: [] })) {
         }
       }
       if (name === './i18n') return { t: (key, params) => { tCalls.push({ key, params }); return key } }
+      // base64 只是过桥的壳、shell 引号另有单测：这里断言的是"往终端写了什么命令"。
+      if (name === './b64') return { encodeText: text => text, decodeText: text => text }
+      if (name === './fsFormat') return { quoteShellArg: path => `'${path}'` }
       // 子面板不参与关窗行为，用类型标记顶替。
       if (name.startsWith('./components/')) return { [name.slice('./components/'.length)]: name.slice('./components/'.length) }
       return {}
@@ -121,6 +124,22 @@ function fixture(invoke = async () => ({ tasks: [] })) {
       assert.ok(modal, '挑战弹窗必须渲染')
       return modal
     },
+    // 页签内容挂在 Tabs 的 items 上（不在 children 里）。
+    tabContent(key) {
+      const tabs = find(node => node.props?.className === 'main-tabs')
+      assert.ok(tabs, '主 Tabs 必须渲染')
+      const item = (tabs.props.items ?? []).find(entry => entry.key === key)
+      assert.ok(item, `tab ${key} must exist`)
+      return item.children
+    },
+    // 终端视图挂在终端页里那层可编辑 Tabs 的 items 上（要先进终端页）。
+    terminalView(sessionKey) {
+      const inner = find(node => node.props?.type === 'editable-card', this.tabContent('terminals'))
+      assert.ok(inner, '终端 Tabs 必须渲染')
+      const item = (inner.props.items ?? []).find(entry => entry.key === sessionKey) ?? (inner.props.items ?? [])[0]
+      assert.ok(item, '终端页签必须存在')
+      return item.children
+    },
     connect(profile) {
       const panel = find(node => node.type === 'ProfilePanel')
       assert.ok(panel, '连接面板必须渲染')
@@ -134,6 +153,179 @@ function fixture(invoke = async () => ({ tasks: [] })) {
 function lastParams(view, key) {
   return { ...view.tCalls.filter(call => call.key === key).at(-1).params }
 }
+
+// 文件浏览相关的接线：显示开关、跟随开关、命令跳转。子面板在本 harness 里是
+// 类型标记，断言的是 App 交给它的 props 与它回调后 App 的动作。
+const SETTINGS = { readOnly: false, sudoAllowlist: [], quickCommands: [], historyLimit: 500 }
+async function withTree(settings = {}) {
+  // 假设置存储：settings.set 之后 settings.get 要读回刚写下去的值，
+  // 否则"保存后勾选框的状态"这类断言会被一个永远返回旧值的桩骗过。
+  const store = { current: { ...SETTINGS, ...settings } }
+  const view = fixture(async (command, args) => {
+    if (command === 'conn.open') return { connectionId: 'c1', profileId: 'p1', state: 'ready' }
+    if (command === 'terminal.open') return { sessionKey: 'k1' }
+    if (command === 'settings.get') return { settings: store.current }
+    if (command === 'settings.set') { store.current = args.settings; return { settings: store.current } }
+    return {}
+  })
+  await view.settle()
+  await view.connect(PROFILE)
+  await view.settle()
+  return Object.assign(view, { store })
+}
+const treeNode = view => view.find(node => node.type === 'FileTreePanel', view.tabContent('terminals'))
+const terminalNode = view => view.find(node => node.type === 'TerminalView', view.terminalView())
+const saved = view => view.calls.filter(call => call.command === 'settings.set').at(-1)?.args?.settings
+
+test('following is only passed to the terminal while the file browser is on screen', async () => {
+  // 跟随开关长在文件浏览面板上：面板没显示就没有可跟随的东西，此时还让终端
+  // 往远端注钩子，用户只会平白看到远端执行了一串 shell 代码。
+  const hidden = await withTree({ cwdFollow: true })
+  try {
+    assert.equal(treeNode(hidden), undefined)
+    assert.equal(terminalNode(hidden).props.followCwd, false, '面板不显示就不该注入')
+  } finally { hidden.unmount() }
+  const shown = await withTree({ showFileTree: true, cwdFollow: true })
+  try {
+    assert.ok(treeNode(shown), '面板显示着')
+    assert.equal(terminalNode(shown).props.followCwd, true, '这时才跟着终端走')
+  } finally { shown.unmount() }
+})
+
+test('the file tree stays hidden until the setting turns it on', async () => {
+  const hidden = await withTree()
+  try {
+    assert.equal(treeNode(hidden), undefined, '缺字段（没开过）按不显示处理')
+  } finally { hidden.unmount() }
+  const shown = await withTree({ showFileTree: true })
+  try {
+    assert.ok(treeNode(shown), '设置里打开才渲染文件浏览')
+    assert.equal(treeNode(shown).props.connectionId, 'c1', '文件浏览跟随活动终端所在连接')
+    assert.equal(treeNode(shown).props.follow, false, '跟随默认关闭')
+  } finally { shown.unmount() }
+})
+
+test('collapsing the tree persists the setting instead of hiding it locally only', async () => {
+  const view = await withTree({ showFileTree: true })
+  try {
+    treeNode(view).props.onCollapse()
+    await view.settle()
+    assert.equal(saved(view).showFileTree, false, '收起要落盘，下次开窗才不会再冒出来')
+  } finally { view.unmount() }
+})
+
+test('the follow checkbox persists the terminal directory follow switch', async () => {
+  const view = await withTree({ showFileTree: true })
+  try {
+    assert.equal(treeNode(view).props.follow, false)
+    treeNode(view).props.onFollowChange(true)
+    await view.settle()
+    assert.equal(saved(view).cwdFollow, true)
+    assert.equal(treeNode(view).props.follow, true, '保存后重新读到的设置要让勾选框显示为勾上')
+  } finally { view.unmount() }
+})
+
+test('the download folder picked in the panel is written back through settings', async () => {
+  const view = await withTree({ showFileTree: true })
+  try {
+    assert.equal(treeNode(view).props.downloadDir, '', '没挑过下载目录时是空的')
+    treeNode(view).props.onDownloadDirChange('D:\\drops')
+    await view.settle()
+    assert.equal(saved(view).downloadDir, 'D:\\drops', '挑定的目录要落盘')
+    assert.equal(treeNode(view).props.downloadDir, 'D:\\drops', '保存后重新读到的设置要让面板显示新目录')
+  } finally { view.unmount() }
+})
+
+
+test('turning the tree back on in settings shows it again after a collapse', async () => {
+  const view = await withTree({ showFileTree: true })
+  try {
+    treeNode(view).props.onCollapse()
+    await view.settle()
+    assert.equal(treeNode(view), undefined, '收起后先是不显示')
+    view.store.current = { ...view.store.current, showFileTree: true }
+    view.find(node => node.type === 'SettingsPanel', view.tabContent('settings')).props.onSaved()
+    await view.settle()
+    assert.ok(treeNode(view), '设置里重新打开要能再显示，收起不能变成永久隐藏')
+  } finally { view.unmount() }
+})
+
+test('a settings change reaches the file panel without a save button', async () => {
+  // 设置面板已经没有保存按钮：它自己落盘，落盘后通知上层重新拉一次设置，
+  // 终端页的文件面板要能立刻跟着出现（这正是当初「开了却看不到」的根因）。
+  const view = await withTree()
+  try {
+    const panel = view.find(node => node.type === 'SettingsPanel', view.tabContent('settings'))
+    assert.ok(panel, '设置面板必须渲染')
+    assert.equal(panel.props.onToggle, undefined, '面板不再靠上层代写，落盘由它自己完成')
+    assert.equal(typeof panel.props.onSaved, 'function', 'App 必须接上"落盘后刷新"')
+    view.store.current = { ...view.store.current, showFileTree: true }
+    panel.props.onSaved()
+    await view.settle()
+    assert.ok(treeNode(view), '设置落盘后文件面板要出现')
+  } finally { view.unmount() }
+})
+
+test('the terminal directory moves the tree only while following is on', async () => {
+  const following = await withTree({ showFileTree: true, cwdFollow: true })
+  try {
+    terminalNode(following).props.onCwd('/srv/app')
+    await following.settle()
+    assert.equal(treeNode(following).props.jump.path, '/srv/app', '跟随打开时终端 cd 要实时跳转')
+  } finally { following.unmount() }
+  const off = await withTree({ showFileTree: true })
+  try {
+    terminalNode(off).props.onCwd('/srv/app')
+    await off.settle()
+    assert.equal(treeNode(off).props.jump, null, '跟随关闭时终端目录不动文件浏览')
+  } finally { off.unmount() }
+})
+
+test('a saved jump mapping reaches the running terminal without reopening it', async () => {
+  const view = await withTree()
+  try {
+    assert.deepEqual([...terminalNode(view).props.treeCommands], [], '默认没有映射')
+    view.store.current = { ...view.store.current, treeCommands: [{ name: 'logs', path: '/var/log' }] }
+    view.find(node => node.type === 'SettingsPanel', view.tabContent('settings')).props.onSaved()
+    await view.settle()
+    const mapped = [...terminalNode(view).props.treeCommands]
+    assert.deepEqual(mapped.map(jump => jump.name), ['logs'], '存完设置要把映射推到终端上，不用重开终端')
+    assert.equal(mapped[0].path, '/var/log')
+  } finally { view.unmount() }
+})
+
+test('turning directory following on moves the tree to where the terminal already is', async () => {
+  // 面板停在 a、终端在 b：开启跟随的那一刻就该跟到 b，不能干等下一次 cd。
+  const view = await withTree({ showFileTree: true })
+  try {
+    terminalNode(view).props.onCwd('/srv/app')
+    await view.settle()
+    assert.equal(treeNode(view).props.jump, null, '没开跟随时面板不动')
+
+    view.store.current = { ...view.store.current, cwdFollow: true }
+    view.find(node => node.type === 'SettingsPanel', view.tabContent('settings')).props.onSaved()
+    await view.settle()
+    assert.equal(treeNode(view).props.jump.path, '/srv/app', '开启跟随要立刻跟到终端所在目录')
+  } finally { view.unmount() }
+})
+
+test('the same directory reported again does not disturb the tree', async () => {
+  // OSC7 钩子挂在 PROMPT_COMMAND 上：用户在终端里每敲一条命令都会上报一次。
+  // 目录没变就不该动面板——否则回一次车面板重载一次（load 里会清空选中项），
+  // 人在终端里干活却一直波及旁边这块面板。
+  const view = await withTree({ showFileTree: true, cwdFollow: true })
+  try {
+    terminalNode(view).props.onCwd('/srv')
+    await view.settle()
+    const first = treeNode(view).props.jump.seq
+    terminalNode(view).props.onCwd('/srv')
+    await view.settle()
+    assert.equal(treeNode(view).props.jump.seq, first, '目录没变，不该再动面板')
+    terminalNode(view).props.onCwd('/srv/app')
+    await view.settle()
+    assert.ok(treeNode(view).props.jump.seq > first, '目录真变了才跟过去')
+  } finally { view.unmount() }
+})
 
 test('closing the window with transfers in flight confirms first and closes only after the user agrees', async () => {
   const view = fixture(async command => command === 'transfer.list'
@@ -280,4 +472,29 @@ test('an answered challenge still opens the terminal tab', async () => {
     assert.equal(view.calls.some(call => call.command === 'terminal.open'), true, '答完挑战要接着开终端')
     assert.equal(view.messages.filter(m => m.type === 'error').length, 0, '正常路径不该报错')
   } finally { view.unmount() }
+})
+
+test('a jump command moves the tree when following, and is ignored when it is off', async () => {
+  // 终端那侧的 cd 由 TerminalView 在识别到整行的当下就把输入换掉发出去（见那边的
+  // 用例）——App 这一层只管面板：跟随时直接跳，不等 OSC7 上报（已经在目标目录时
+  // cd 是空操作、cwd 不变，上报根本不会发生）。
+  const on = await withTree({ showFileTree: true, cwdFollow: true })
+  try {
+    on.calls.length = 0
+    terminalNode(on).props.onJump('/opt/tomcat')
+    await on.settle()
+    assert.equal(treeNode(on).props.jump.path, '/opt/tomcat', '跟随时面板要直接到位')
+    assert.equal(
+      on.calls.some(call => call.command === 'terminal.write'), false,
+      'App 不再自己补 cd：那会和远端打印提示符赛跑，屏幕上多印一行',
+    )
+  } finally { on.unmount() }
+
+  const off = await withTree({ showFileTree: true })
+  try {
+    off.calls.length = 0
+    terminalNode(off).props.onJump('/opt/tomcat')
+    await off.settle()
+    assert.equal(treeNode(off).props.jump, null, '没开跟随时面板留在原地')
+  } finally { off.unmount() }
 })

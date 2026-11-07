@@ -378,7 +378,7 @@ export function ProfilePanel({
                   <span className="conn-card-links">
                     <a aria-disabled={deleting} onClick={() => { if (!deleteBusy.current) openForm(p) }}>{t('conn.edit')}</a>
                     <Popconfirm disabled={deleting} title={`${t('conn.delete')} ${p.name}?`} onConfirm={() => deleteProfile(p)}>
-                      <a className="profile-del">{t('conn.delete')}</a>
+                      <a className="profile-del" aria-disabled={deleting}>{t('conn.delete')}</a>
                     </Popconfirm>
                   </span>
                 </div>

@@ -73,6 +73,122 @@ func TestUpdatePartialMerge(t *testing.T) {
 	}
 }
 
+// 本地回显：未配置保持 nil（前端按开启处理），显式关闭要落盘，
+// 且后续只改其他字段的部分更新不能把它顶回默认。
+func TestLocalEchoPersistence(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(dir)
+	if s.Get().LocalEcho != nil {
+		t.Fatalf("unset local echo must stay nil, got %v", *s.Get().LocalEcho)
+	}
+	off := false
+	if err := s.Update(Settings{LocalEcho: &off}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if err := s.Update(Settings{ReadOnly: true}); err != nil {
+		t.Fatalf("partial update: %v", err)
+	}
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	got := reopened.Get().LocalEcho
+	if got == nil || *got {
+		t.Fatalf("localEcho=false must survive a partial update and a reload, got %v", got)
+	}
+}
+
+// 文件树：显示开关未配置视为显示（与 localEcho/historyEnabled 一致），
+// 命令跳转映射要落盘，且部分更新不能把两者顶回默认。
+func TestFileTreeSettings(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(dir)
+	if s.Get().ShowFileTree != nil {
+		t.Fatalf("unset showFileTree must stay nil, got %v", *s.Get().ShowFileTree)
+	}
+	hide := false
+	jumps := []TreeCommand{{Name: "logs", Path: "/var/log"}, {Name: "app", Path: "/opt/app"}}
+	if err := s.Update(Settings{ShowFileTree: &hide, TreeCommands: jumps}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if err := s.Update(Settings{ReadOnly: true}); err != nil {
+		t.Fatalf("partial update: %v", err)
+	}
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	got := reopened.Get()
+	if got.ShowFileTree == nil || *got.ShowFileTree {
+		t.Fatalf("showFileTree=false must survive a partial update and a reload, got %v", got.ShowFileTree)
+	}
+	if len(got.TreeCommands) != 2 || got.TreeCommands[0].Name != "logs" || got.TreeCommands[1].Path != "/opt/app" {
+		t.Fatalf("tree commands lost on reload: %+v", got.TreeCommands)
+	}
+	// 显式清空映射要能落下去（空切片不等于"没传"）。
+	if err := s.Update(Settings{TreeCommands: []TreeCommand{}}); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if len(s.Get().TreeCommands) != 0 {
+		t.Fatalf("explicit empty list must clear the mapping, got %+v", s.Get().TreeCommands)
+	}
+}
+
+// 终端页三个可选开关（目录跟随、本地回显、文件浏览）的缺省语义统一为「关」：
+// 未配置就是关。用户没开过的功能不该在他不知情时自己亮起来——跟随还要往远端
+// shell 注入钩子，默认开等于替用户动了远端。
+func TestOptionalSwitchesDefaultOff(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(dir)
+	got := s.Get()
+	if got.CwdFollowOn() || got.LocalEchoOn() || got.ShowFileTreeOn() {
+		t.Fatalf("unset switches must read as off, got cwd=%v echo=%v tree=%v",
+			got.CwdFollowOn(), got.LocalEchoOn(), got.ShowFileTreeOn())
+	}
+	on := true
+	if err := s.Update(Settings{CwdFollow: &on, LocalEcho: &on, ShowFileTree: &on}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	// 只改别的字段的部分更新不能把刚打开的三个开关顶回关闭。
+	if err := s.Update(Settings{ReadOnly: true}); err != nil {
+		t.Fatalf("partial update: %v", err)
+	}
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	got = reopened.Get()
+	if !got.CwdFollowOn() || !got.LocalEchoOn() || !got.ShowFileTreeOn() {
+		t.Fatalf("explicitly enabled switches must survive a partial update and a reload, got cwd=%v echo=%v tree=%v",
+			got.CwdFollowOn(), got.LocalEchoOn(), got.ShowFileTreeOn())
+	}
+}
+
+// 下载目录：文件浏览面板下载文件的落点，由宿主原生目录选择器挑一次后记住。
+// 没设过（nil）与"设为空串"要能区分——后者是用户主动清掉。
+func TestDownloadDirPersistence(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(dir)
+	if s.Get().DownloadDir != nil {
+		t.Fatalf("unset download dir must stay nil, got %q", *s.Get().DownloadDir)
+	}
+	downloads := `D:\drops`
+	if err := s.Update(Settings{DownloadDir: &downloads}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if err := s.Update(Settings{ReadOnly: true}); err != nil {
+		t.Fatalf("partial update: %v", err)
+	}
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	got := reopened.Get().DownloadDir
+	if got == nil || *got != downloads {
+		t.Fatalf("download dir must survive a partial update and a reload, got %v", got)
+	}
+}
+
 // 只读白名单放行/拒绝。
 func TestAllowedReadOnlyExec(t *testing.T) {
 	s, _ := Open(t.TempDir())

@@ -88,6 +88,19 @@ export interface PluginSettings {
   historyLimit: number
   historyEnabled?: boolean
   cwdFollow?: boolean
+  /** 终端本地预测回显；缺省（undefined）视为关闭。 */
+  localEcho?: boolean
+  /** 终端页左侧显示远端文件浏览；缺省（undefined）视为关闭。 */
+  showFileTree?: boolean
+  /** 终端命令 → 目录的跳转映射：整行输入 #name 并回车，文件浏览跳到 path。 */
+  treeCommands?: TreeCommand[]
+  /** 文件浏览下载文件的落地目录；缺省（undefined）＝还没挑过。 */
+  downloadDir?: string
+}
+
+export interface TreeCommand {
+  name: string
+  path: string
 }
 
 export interface TerminalTab {

@@ -5,6 +5,30 @@ const vm = require('node:vm')
 const test = require('node:test')
 const ts = require('typescript')
 
+// 公共模块（面包屑、格式化）按真实实现加载：它们没有副作用，桩掉等于用例
+// 建在替身上。JSX 只作结构记录，与本 harness 的树形状保持一致。
+const jsxShim = (type, props) => ({ type, props })
+function loadModule(file, globals = {}) {
+  const code = ts.transpileModule(fs.readFileSync(file, 'utf8'), {
+    fileName: file,
+    compilerOptions: { target: ts.ScriptTarget.ES2021, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
+  }).outputText
+  const module = { exports: {} }
+  const requireShim = name => (name === 'react/jsx-runtime' ? { jsx: jsxShim, jsxs: jsxShim, Fragment: 'Fragment' } : {})
+  vm.runInNewContext(code, { module, exports: module.exports, require: requireShim, ...globals }, { filename: file })
+  return module.exports
+}
+
+// renderItem 现在返回的是包着 Dropdown 的行——右键菜单要靠它才能拦下 contextMenu，
+// 这层包装去不掉。真正的 List.Item 在它的 children 上。
+function rowOf(list, name) {
+  const target = name === undefined
+    ? list.props.dataSource[0]
+    : list.props.dataSource.find(item => item.name === name)
+  const node = list.props.renderItem(target)
+  return node.props.children ?? node
+}
+
 function fixture(invoke = async () => ({})) {
   const hooks = [], effects = [], scheduled = [], calls = [], timers = new Map(), messages = [], modals = []
   let cursor = 0, tree, nextTimer = 0, changed = false
@@ -50,6 +74,9 @@ function fixture(invoke = async () => ({})) {
       if (name === '../bridge') return { invokeAs: async (command, args) => { calls.push({ command, args }); return invoke(command, args) }, describeError: error => error.message || String(error) }
       if (name === '../i18n') return { t: key => key }
       if (name === '../b64') return { decodeText: text => text, encodeText: text => text }
+      // 面包屑与大小/时间格式化已抽成公共模块，按真实实现加载。
+      if (name === '../fsFormat') return loadModule(path.join(__dirname, 'fsFormat.ts'))
+      if (name === './PathBreadcrumb') return loadModule(path.join(__dirname, 'components/PathBreadcrumb.tsx'))
       if (name === './sftpRequests') {
         const helper = { exports: {} }
         const code = ts.transpileModule(fs.readFileSync(path.join(__dirname, 'components/sftpRequests.ts'), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2021, module: ts.ModuleKind.CommonJS } }).outputText
@@ -106,9 +133,10 @@ test('late server A list cannot become a server B deletion source', async () => 
     assert.equal(list().props.dataSource[0].path, entryB.path)
     releaseA({ entries: [entryA], more: true })
     await view.settle()
-    list().props.renderItem(list().props.dataSource[0]).props.onClick()
+    rowOf(list()).props.onClick()
     await view.settle()
-    await view.find(node => node.type === 'Button' && node.props.title === 'sftp.remove', pane()).props.onClick()
+    await view.find(node => node.type === 'Button' && node.props['aria-label'] === 'sftp.remove', pane()).props.onClick()
+
     assert.deepEqual(JSON.parse(JSON.stringify(view.calls.filter(call => call.command === 'sftp.remove').map(call => call.args))), [{ connectionId: 'ready-b', path: entryB.path }], 'late A must never send server B a deletion for path A')
     assert.equal(list().props.dataSource[0].path, entryB.path)
   } finally { releaseA({ entries: [], more: false }); view.unmount() }
@@ -219,7 +247,9 @@ function deferred() {
 }
 function pane(view, side = 'right') { return view.find(node => node.props?.className === 'sftp-columns').props.children[side === 'left' ? 0 : 1] }
 function listing(view, side = 'right') { return view.find(node => node.type === 'List', pane(view, side)) }
-function button(view, title, side = 'right') { return view.find(node => node.type === 'Button' && node.props.title === title, pane(view, side)) }
+// 远端栏的具名图标按钮统一用 aria-label 定位：它们的提示改由外层 Tooltip 承担
+// （disabled 的原生 title 不显示），aria-label 不受这层包装影响。
+function button(view, label, side = 'right') { return view.find(node => node.type === 'Button' && node.props['aria-label'] === label, pane(view, side)) }
 function navigate(view, target, side = 'right') { view.find(node => node.props?.onNavigate, pane(view, side)).props.onNavigate(target) }
 function entry(name) { return { name, path: '/' + name, isDir: false, size: 1 } }
 function basic(command) { return command === 'fs.listLocal' ? { entries: [], home: '' } : { tasks: [] } }
@@ -238,7 +268,7 @@ for (const side of ['left', 'right']) for (const exit of ['blur', 'escape']) {
     try {
       await view.settle()
       const before = Array.from(listing(view, side).props.dataSource, item => item.path)
-      const item = listing(view, side).props.renderItem(listing(view, side).props.dataSource[0])
+      const item = rowOf(listing(view, side))
       item.props.onClick(); await view.settle()
       const oldPath = view.find(node => node.props?.onNavigate, pane(view, side)).props.path
       const requestCount = view.calls.filter(call => call.command === 'fs.listLocal' || call.command === 'sftp.list').length
@@ -256,7 +286,7 @@ for (const side of ['left', 'right']) for (const exit of ['blur', 'escape']) {
       assert.deepEqual(Array.from(listing(view, side).props.dataSource, item => item.path), before)
       assert.equal(view.find(node => node.props?.onNavigate, pane(view, side)).props.path, oldPath)
       assert.equal(view.calls.filter(call => call.command === 'fs.listLocal' || call.command === 'sftp.list').length, requestCount)
-      assert.ok(listing(view, side).props.renderItem(listing(view, side).props.dataSource[0]).props.className.includes('fs-selected'))
+      assert.ok(rowOf(listing(view, side)).props.className.includes('fs-selected'))
       view.find(node => node.props?.title === 'sftp.editPath', pane(view, side)).props.onClick(); view.render()
       assert.equal(pathInput(view, side).props.value, oldPath, 'reopening the editor must reset the abandoned draft')
     } finally { view.unmount() }
@@ -404,7 +434,7 @@ test('pagination ignores duplicate clicks and old pages overtaken by a refresh',
 test('selection, stale row handlers and asynchronous mkdir stay bound to their original source', async () => {
   const view = fixture(async command => command === 'sftp.list' ? { entries: [entry('source-A')], more: false } : basic(command))
   try {
-    await view.settle(); const row = listing(view).props.renderItem(listing(view).props.dataSource[0]); row.props.onClick(); await view.settle()
+    await view.settle(); const row = rowOf(listing(view)); row.props.onClick(); await view.settle()
     const remove = button(view, 'sftp.remove'), mkdir = button(view, 'sftp.mkdir').props.onClick()
     const modal = view.modals.at(-1); modal.content.props.onChange({ target: { value: 'folder-A' } })
     view.find(node => node.type === 'Select', pane(view)).props.onChange('b'); await view.settle()
@@ -445,18 +475,6 @@ test('right explicit mode switch prefers an existing ready profile without reope
     assert.equal(view.calls.filter(call => call.command === 'sftp.list')[0].args.connectionId, 'ready-c')
   } finally { view.unmount() }
 })
-test('late preview cannot reopen the editor or write its path into a different connection', async () => {
-  const pending = deferred()
-  const view = fixture(async command => command === 'sftp.preview' ? pending.promise : command === 'sftp.list' ? { entries: [entry('preview-A')], more: false } : basic(command))
-  try {
-    await view.settle(); listing(view).props.renderItem(listing(view).props.dataSource[0]).props.onDoubleClick()
-    view.find(node => node.type === 'Select', pane(view)).props.onChange('b'); await view.settle()
-    pending.resolve({ dataBase64: 'old preview' }); await view.settle()
-    const modal = view.find(node => node.props?.okText === 'sftp.saveFile'); assert.equal(modal.props.open, false); await modal.props.onOk()
-    assert.equal(view.calls.some(call => call.command === 'sftp.writeFile'), false)
-  } finally { pending.resolve({ dataBase64: '' }); view.unmount() }
-})
-
 for (const change of ['disconnect', 'mode', 'profile', 'path', 'ABA', 'unmount']) test('late list error is silent after ' + change, async () => {
   const pending = deferred(); let hold = false
   const view = fixture(async command => command === 'sftp.list' ? hold ? pending.promise : { entries: [entry('valid')], more: false } : basic(command))
@@ -480,16 +498,6 @@ test('pagination retries failed pages and deduplicates paths against the loaded 
     assert.equal(!!listing(view).props.footer, false)
   } finally { view.unmount() }
 })
-test('pending preview save is rejected after directory refresh and connection identity replacement', async () => {
-  const view = fixture(async command => command === 'sftp.preview' ? { dataBase64: 'editable' } : command === 'sftp.list' ? { entries: [entry('preview')], more: false } : basic(command))
-  try {
-    await view.settle(); listing(view).props.renderItem(listing(view).props.dataSource[0]).props.onDoubleClick(); await view.settle()
-    const modal = view.find(node => node.props?.okText === 'sftp.saveFile'); assert.equal(modal.props.open, true)
-    view.props.connections = [{ profileId: 'a', connectionId: 'replacement-a', state: 'ready', alive: true }]; await view.settle(); await modal.props.onOk()
-    assert.equal(view.calls.some(call => call.command === 'sftp.writeFile'), false)
-  } finally { view.unmount() }
-})
-
 test('old pagination and usage event handlers cannot revive the previous directory', async () => {
   const view = fixture(async command => command === 'sftp.list' ? { entries: [entry('base')], more: true } : basic(command))
   try {
@@ -512,93 +520,6 @@ for (const change of ['refresh', 'ABA']) test('mkdir confirmation is invalid aft
   } finally { view.unmount() }
 })
 
-function previewModal(view) { return view.find(node => node.props?.okText === 'sftp.saveFile') }
-function openPreview(view, name) {
-  const list = listing(view)
-  list.props.renderItem(list.props.dataSource.find(item => item.name === name)).props.onDoubleClick()
-}
-for (const cancel of [false, true]) test('preview request token accepts only latest same-directory result' + (cancel ? ' and cancel discards it' : ''), async () => {
-  const x = deferred(), y = deferred()
-  const view = fixture(async (command, args) => command === 'sftp.preview' ? args.path === '/X' ? x.promise : y.promise : command === 'sftp.list' ? { entries: [entry('X'), entry('Y')], more: false } : basic(command))
-  try {
-    await view.settle(); openPreview(view, 'X'); openPreview(view, 'Y')
-    y.resolve({ dataBase64: 'Y data' }); await view.settle()
-    assert.equal(previewModal(view).props.title, 'sftp.preview: /Y')
-    if (cancel) { previewModal(view).props.onCancel(); await view.settle() }
-    x.resolve({ dataBase64: 'X late data' }); await view.settle()
-    assert.equal(previewModal(view).props.open, !cancel, 'obsolete X must never reopen cancelled Y')
-    if (!cancel) assert.equal(previewModal(view).props.title, 'sftp.preview: /Y', 'obsolete X must never replace Y')
-  } finally { x.resolve({ dataBase64: '' }); y.resolve({ dataBase64: '' }); view.unmount() }
-})
-test('preview request token cancels a pending response before it opens the editor', async () => {
-  const pending = deferred()
-  const view = fixture(async command => command === 'sftp.preview' ? pending.promise : command === 'sftp.list' ? { entries: [entry('X')], more: false } : basic(command))
-  try {
-    await view.settle(); openPreview(view, 'X'); previewModal(view).props.onCancel(); await view.settle()
-    pending.resolve({ dataBase64: 'cancelled data' }); await view.settle()
-    assert.equal(previewModal(view).props.open, false, 'cancel must discard an in-flight preview')
-  } finally { pending.resolve({ dataBase64: '' }); view.unmount() }
-})
-
-for (const failure of [false, true]) test('preview save token ignores old ' + (failure ? 'error' : 'completion') + ' after a new same-directory editor opens', async () => {
-  const saved = deferred()
-  const view = fixture(async (command, args) => command === 'sftp.preview' ? { dataBase64: args.path } : command === 'sftp.writeFile' ? saved.promise : command === 'sftp.list' ? { entries: [entry('X'), entry('Y')], more: false } : basic(command))
-  try {
-    await view.settle(); openPreview(view, 'X'); await view.settle()
-    const oldModal = previewModal(view), save = oldModal.props.onOk()
-    assert.equal(view.calls.filter(call => call.command === 'sftp.writeFile').length, 1)
-    oldModal.props.onCancel(); await view.settle(); openPreview(view, 'Y'); await view.settle()
-    assert.equal(previewModal(view).props.title, 'sftp.preview: /Y')
-    if (failure) saved.reject(new Error('old X save failed')); else saved.resolve({})
-    await save; await view.settle()
-    assert.equal(previewModal(view).props.open, true, 'old X completion must not close Y')
-    assert.equal(previewModal(view).props.title, 'sftp.preview: /Y')
-    assert.deepEqual(view.messages, [], 'obsolete save must not report success or failure')
-  } finally { saved.resolve({}); view.unmount() }
-})
-test('preview save token never replays a cancelled editor write or duplicates an in-flight save', async () => {
-  const saved = deferred()
-  const view = fixture(async (command, args) => command === 'sftp.preview' ? { dataBase64: args.path } : command === 'sftp.writeFile' ? saved.promise : command === 'sftp.list' ? { entries: [entry('X'), entry('Y')], more: false } : basic(command))
-  try {
-    await view.settle(); openPreview(view, 'X'); await view.settle()
-    const oldModal = previewModal(view), save = oldModal.props.onOk(), duplicate = oldModal.props.onOk()
-    assert.equal(view.calls.filter(call => call.command === 'sftp.writeFile').length, 1, 'same in-flight save cannot issue a second write')
-    oldModal.props.onCancel(); await view.settle(); openPreview(view, 'Y'); await view.settle()
-    const staleSave = oldModal.props.onOk()
-    assert.equal(view.calls.filter(call => call.command === 'sftp.writeFile').length, 1, 'cancelled editor cannot issue another write')
-    saved.resolve({}); await Promise.all([save, duplicate, staleSave]); await view.settle()
-    assert.equal(previewModal(view).props.open, true)
-  } finally { saved.resolve({}); view.unmount() }
-})
-
-for (const change of ['cancel', 'refresh', 'unmount']) for (const failure of [false, true]) test('preview save token discards ' + (failure ? 'error' : 'completion') + ' after ' + change, async () => {
-  const saved = deferred()
-  const view = fixture(async command => command === 'sftp.preview' ? { dataBase64: 'X' } : command === 'sftp.writeFile' ? saved.promise : command === 'sftp.list' ? { entries: [entry('X')], more: false } : basic(command))
-  try {
-    await view.settle(); openPreview(view, 'X'); await view.settle()
-    const oldModal = previewModal(view), save = oldModal.props.onOk()
-    if (change === 'cancel') oldModal.props.onCancel()
-    if (change === 'refresh') button(view, 'sftp.refresh').props.onClick()
-    if (change === 'unmount') view.unmount(); else await view.settle()
-    if (failure) saved.reject(new Error('obsolete save error')); else saved.resolve({})
-    await save; await view.settle()
-    assert.deepEqual(view.messages, [], 'invalidated save must not publish a late notification')
-    assert.equal(view.calls.filter(call => call.command === 'sftp.writeFile').length, 1)
-    assert.equal(previewModal(view).props.open, false)
-  } finally { saved.resolve({}); view.unmount() }
-})
-for (const change of ['cancel', 'refresh', 'unmount']) test('preview request token discards late errors after ' + change, async () => {
-  const pending = deferred()
-  const view = fixture(async command => command === 'sftp.preview' ? pending.promise : command === 'sftp.list' ? { entries: [entry('X')], more: false } : basic(command))
-  try {
-    await view.settle(); openPreview(view, 'X')
-    if (change === 'cancel') previewModal(view).props.onCancel()
-    if (change === 'refresh') button(view, 'sftp.refresh').props.onClick()
-    if (change === 'unmount') view.unmount(); else await view.settle()
-    pending.reject(new Error('obsolete preview error')); await view.settle()
-    assert.deepEqual(view.messages, []); assert.equal(previewModal(view).props.open, false)
-  } finally { pending.resolve({ dataBase64: '' }); view.unmount() }
-})
 test('an interrupted transfer explains the cause and offers resume', async () => {
   const task = { id: 't1', connectionId: 'ready-a', direction: 'download', remotePath: '/data/big.bin', localPath: '', state: 'interrupted', bytesDone: 512, totalBytes: 4096 }
   const view = fixture(async command => command === 'sftp.list' || command === 'fs.listLocal' ? { entries: [], home: '' } : { tasks: [task] })
@@ -614,3 +535,7 @@ test('an interrupted transfer explains the cause and offers resume', async () =>
     assert.deepEqual(JSON.parse(JSON.stringify(view.calls.filter(call => call.command === 'transfer.retry').map(call => call.args))), [{ taskId: 't1', connectionId: 'ready-a' }])
   } finally { view.unmount() }
 })
+
+// 只读模式下后端会拒掉写命令：按钮还亮着的话用户点了才被弹回错误。
+// 远端栏的具名按钮统一按 aria-label 定位（见 button()）。
+

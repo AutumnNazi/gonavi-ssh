@@ -9,10 +9,12 @@ import (
 	"gonavi-ssh/internal/sshclient"
 )
 
-// agentCommands 返回 Agent/自动化命令域。命令粒度按"人机两用"设计：
-// 这些命令在插件声明 ai.tools 后会进入 GoNavi Agent 工具目录。
-// exec 系列不做静态只读 gate：是否放行由 settings 的只读 exec 白名单
-// 在 handler 内动态判定（只读模式下仍可跑巡检类只读命令）。
+// agentCommands 返回 Agent/自动化命令域。这些命令在插件声明 ai.tools 后会
+// 进入 GoNavi Agent 工具目录，是只读模式唯一管得到的通道。
+//
+// exec 系列不做静态只读 gate：是否放行由 settings 的只读 exec 白名单在
+// handler 内动态判定（只读模式下仍可跑巡检类只读命令）。runBg 反过来——
+// 后台长任务没法事前核对命令，直接静态拦下。
 func (a *App) agentCommands() []command {
 	return []command{
 		{"agent.exec", false, a.agentExec},

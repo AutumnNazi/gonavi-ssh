@@ -13,28 +13,30 @@ import (
 
 // sftpCommands 返回文件域命令（远程 SFTP + 本地 FS + 传输任务）。
 // 文件内容不过桥：预览限 256 KiB，大文件走 transfer 直传磁盘。
+// 这一域全是人工操作（点按钮、拖文件），只读模式不拦——它只管 Agent 通道。
 func (a *App) sftpCommands() []command {
 	return []command{
 		{"sftp.list", false, a.sftpList},
 		{"sftp.stat", false, a.sftpStat},
 		{"sftp.pwd", false, a.sftpPwd},
-		{"sftp.mkdir", true, a.sftpMkdir},
-		{"sftp.rename", true, a.sftpRename},
-		{"sftp.copy", true, a.sftpCopy},
-		{"sftp.chmod", true, a.sftpChmod},
-		{"sftp.remove", true, a.sftpRemove},
-		{"sftp.removeRecursive", true, a.sftpRemoveRecursive},
+		{"sftp.mkdir", false, a.sftpMkdir},
+		{"sftp.rename", false, a.sftpRename},
+		{"sftp.copy", false, a.sftpCopy},
+		{"sftp.chmod", false, a.sftpChmod},
+		{"sftp.remove", false, a.sftpRemove},
+		{"sftp.removeRecursive", false, a.sftpRemoveRecursive},
 		{"sftp.preview", false, a.sftpPreview},
-		{"sftp.writeFile", true, a.sftpWriteFile},
+		{"sftp.writeFile", false, a.sftpWriteFile},
+		{"sftp.openExternal", false, a.sftpOpenExternal},
 		{"sftp.du", false, a.sftpDu},
 		{"knownHosts.list", false, a.knownHostsList},
-		{"knownHosts.remove", true, a.knownHostsRemove},
+		{"knownHosts.remove", false, a.knownHostsRemove},
 		{"fs.listLocal", false, a.fsListLocal},
-		{"transfer.start", true, a.transferStart},
+		{"transfer.start", false, a.transferStart},
 		{"transfer.status", false, a.transferStatus},
 		{"transfer.list", false, a.transferList},
 		{"transfer.cancel", false, a.transferCancel},
-		{"transfer.retry", true, a.transferRetry},
+		{"transfer.retry", false, a.transferRetry},
 	}
 }
 
