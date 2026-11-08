@@ -47,6 +47,7 @@ test('real main ConfigProvider and CSS consume initial and same-mode host preset
     const first = host.render()
     assert.equal(first.props.theme.token?.colorPrimary, '#a16024', 'first ConfigProvider render must receive the actual preset')
     assert.equal(first.props.theme.token?.colorLink, '#a16024', 'connection action links must use the host accent')
+    assert.equal(first.props.theme.components.Input.colorBgContainer, '#fffdf8')
     assert.equal(host.properties.get('--bg'), '#fff8ed')
     const app = first.props.children.type
     host.send({ locale: 'ja-JP', theme: 'light', palette: { bg: '#eef8f4', code: '#edf5f1', text: '#213d30', accent: '#267657' } })
@@ -81,12 +82,14 @@ test('invalid and absent host values clear stale palette and metrics; repeated s
     assert.equal(host.cache['hostPrefs.ts'].hostPrefs.palette, undefined)
     assert.equal(host.cache['hostPrefs.ts'].hostPrefs.appearance, undefined)
     assert.equal(host.properties.size, 0)
-    assert.equal(cleared.props.theme.token.colorPrimary, undefined)
+    assert.equal(cleared.props.theme.token.colorPrimary, undefined, 'the plugin must not inject its own accent')
+    assert.equal(cleared.props.theme.components.Input.colorBgContainer, undefined, 'absent input colors must use the host mode algorithm')
     assert.equal(host.classes.has('theme-dark'), true)
     host.send(undefined)
     const fallback = host.render()
     assert.equal(host.cache['hostPrefs.ts'].hostPrefs.locale, 'en-US')
     assert.equal(fallback.props.theme.algorithm({}).mode, 'light')
+    assert.equal(fallback.props.theme.components.Input.colorBgContainer, undefined, 'switching to light must clear stale host input colors')
     assert.equal(host.classes.has('theme-dark'), false)
   } finally { host.unmount() }
 })

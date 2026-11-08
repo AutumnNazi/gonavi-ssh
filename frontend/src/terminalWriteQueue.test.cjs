@@ -238,8 +238,8 @@ test('production terminal enters unavailable state after exactly 41 busy write f
     assert.equal(overlay.props.children.props.children, 'term.inputUnavailable')
     assert.equal(input('after-exhaustion'), false)
     assert.equal(input('\x03'), false)
-    findNode(view.tree, node => node.props?.className === 'quick-cmd' && node.props.children === 'quick').props.onClick()
-    findNode(view.tree, node => node.props?.className === 'quick-cmd' && node.props.children === 'term.ctrlc').props.onClick()
+    findNode(view.tree, node => node.props?.menu?.items?.some(item => item.key === '0')).props.menu.onClick({ key: '0' })
+    findNode(view.tree, node => node.type === 'button' && node.props.children === 'term.ctrlc').props.onClick()
     await pasteButton(view.tree).props.onClick({ currentTarget: view.document.activeElement })
     assert.equal(pasteReads, 0, 'unavailable paste must not read the clipboard')
     assert.equal(attempts.length, 41, 'no further keys, Ctrl+C, quick command or paste may invoke write')
@@ -616,12 +616,18 @@ test('read failures back off eight times and then release every terminal as unav
 function terminalView(write, clipboard = { writeText: async () => {} }, initialPrefs, settings = { quickCommands: [], cwdFollow: false }) {
   const time = clock()
   const hooks = [], effects = [], pending = [], terminals = [], warnings = [], notices = [], reads = [], observers = []
+  const fits = [], frames = []
+  let hostSize = { width: 800, height: 600 }
   let cursor = 0, now = 0, hostVisible = true, rendered
   const body = {}
   const window = new EventTarget()
   window.gonaviHostPrefs = initialPrefs
   const document = { body, activeElement: body, createElement: () => ({ style: {} }) }
-  const host = { getClientRects: () => hostVisible ? [{}] : [], contains: element => !!element?.insideTerminal }
+  const host = {
+    getClientRects: () => hostVisible ? [{}] : [],
+    getBoundingClientRect: () => hostVisible ? hostSize : { width: 0, height: 0 },
+    contains: element => !!element?.insideTerminal,
+  }
   const react = {
     useRef(value) { const index = cursor++; return hooks[index] ??= { current: value } },
     useState(value) {
@@ -651,7 +657,7 @@ function terminalView(write, clipboard = { writeText: async () => {} }, initialP
     attachCustomKeyEventHandler(handler) { this.keyHandler = handler }
     dispose() { this.disposed = true }
   }
-  class FitAddon { fit() {} }
+  class FitAddon { fit() { fits.push({ ...host.getBoundingClientRect() }) } }
   class ResizeObserver { constructor(callback) { this.callback = callback; observers.push(this) }; observe() {}; disconnect() { this.disconnected = true } }
   function jsx(type, props) {
     if (props.ref) props.ref.current = host
@@ -699,6 +705,7 @@ function terminalView(write, clipboard = { writeText: async () => {} }, initialP
   })
   const exports = loadTs(path.join(__dirname, 'components/TerminalView.tsx'), {
     ...time, Date: { now: () => now }, Terminal, FitAddon, ResizeObserver, navigator: { clipboard }, document,
+    requestAnimationFrame: callback => frames.push(callback),
     require(name) {
       if (name === 'react') return react
       if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx }
@@ -730,7 +737,7 @@ function terminalView(write, clipboard = { writeText: async () => {} }, initialP
     currentSessionKey = sessionKey
     rendered = exports.TerminalView({
       tab: { sessionKey, connectionId: 'connection', tabKey: 'tab' },
-      allTabs: [],
+      allTabs: settings.allTabs ?? [],
       onCwd() {},
       // 设置项由上层推下来（终端不再自己去拉）：本套用例只用到快捷命令；
       // localEcho 不传＝按开启处理，与旧口径一致。
@@ -741,7 +748,9 @@ function terminalView(write, clipboard = { writeText: async () => {} }, initialP
     return terminals.at(-1).input
   }
   return {
-    warnings, notices, time, terminals, render, observers, document, hostPrefs, reads,
+    warnings, notices, time, terminals, render, observers, document, hostPrefs, reads, fits, frames,
+    resize(width, height) { hostSize = { width, height }; observers.at(-1).callback() },
+    frame() { for (const callback of frames.splice(0)) callback() },
     get tree() { return rendered },
     preferences(value) { window.gonaviHostPrefs = value; window.dispatchEvent(new Event('gonavi:host-preferences')) },
     setVisible(value) { hostVisible = value; observers.at(-1).callback() },
@@ -967,6 +976,31 @@ test('only hidden-to-visible terminal transitions restore focus, keeping the sam
     view.setVisible(true)
     assert.equal(term.focusCount, 2, 'an unrelated input must keep focus when a terminal becomes visible')
   } finally { await view.unmount() }
+})
+
+test('terminal fits once per frame at the latest size and ignores unchanged or inactive hosts', async () => {
+  const view = terminalView(async () => {})
+  view.render()
+  assert.equal(view.fits.length, 1)
+  view.resize(800, 600)
+  view.resize(900, 650)
+  view.resize(950, 680)
+  assert.equal(view.frames.length, 1)
+  view.frame()
+  assert.deepEqual(view.fits.at(-1), { width: 950, height: 680 })
+  for (let n = 0; n < 100; n++) view.resize(950, 680)
+  assert.equal(view.frames.length, 0, 'unchanged observer notifications must not schedule fit')
+  view.resize(1000, 700)
+  view.setVisible(false)
+  view.frame()
+  assert.equal(view.fits.length, 2, 'a host hidden before the frame must not be fitted')
+  view.setVisible(true)
+  view.frame()
+  assert.deepEqual(view.fits.at(-1), { width: 1000, height: 700 })
+  view.resize(1100, 750)
+  await view.unmount()
+  view.frame()
+  assert.equal(view.fits.length, 3, 'pending frames cannot fit disposed terminals')
 })
 
 test('new terminal, transfer-interrupt and window-close messages exist in all six locale catalogs', () => {
@@ -1284,5 +1318,34 @@ test('terminal instructions occupy only copy and broadcast tooltips, with readab
     assert.equal(nodes.filter(node => node.props?.title === 'term.selectionHelp').length, 1)
     assert.equal(nodes.filter(node => node.props?.title === 'term.broadcastScope').length, 1)
     assert.equal(view.terminals[0].options.theme.selectionForeground, '#ffffff')
+  } finally { await view.unmount() }
+})
+
+
+test('saved command menu uses the input queue and broadcasts only to the same connection', async () => {
+  const sent = []
+  const view = terminalView(async (command, args) => sent.push({ command, args }), undefined, undefined, {
+    quickCommands: [{ name: '磁盘空间', command: 'df -h' }],
+    allTabs: [{ tabKey: 'tab', sessionKey: 'session', connectionId: 'connection' }, { tabKey: 'peer', sessionKey: 'peer-session', connectionId: 'connection' }, { tabKey: 'other', sessionKey: 'other-session', connectionId: 'other-connection' }],
+  })
+  try {
+    view.render()
+    assert.equal(sent.length, 0, 'opening a view must not execute a saved command')
+    const menu = () => findNode(view.tree, n => n.props?.menu?.items?.some(item => item.key === '0')).props.menu
+    let prevented = false, stopped = false
+    menu().onClick({ key: '0', domEvent: { preventDefault() { prevented = true }, stopPropagation() { stopped = true } } })
+    assert.equal(prevented && stopped, true, 'consume the menu key before returning focus to the terminal')
+    await tick()
+    assert.equal(sent[0].command, 'terminal.write')
+    assert.equal(Buffer.from(sent[0].args.dataBase64, 'base64').toString(), 'df -h\r')
+    findNode(view.tree, n => n.props?.['aria-label'] === 'term.broadcast').props.onChange(true)
+    view.render()
+    assert.ok(findNode(view.tree, n => n.props?.className === 'terminal-broadcast is-active'))
+    menu().onClick({ key: '0' })
+    await tick()
+    assert.equal(sent[1].command, 'terminal.writeMulti')
+    assert.deepEqual(Array.from(sent[1].args.sessionKeys), ['session', 'peer-session'])
+    assert.equal(Buffer.from(sent[1].args.dataBase64, 'base64').toString(), 'df -h\r')
+    assert.equal(view.terminals.length, 1)
   } finally { await view.unmount() }
 })

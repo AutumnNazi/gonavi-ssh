@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { App as AntApp, Button, Card, Form, Input, List, Popconfirm, Space, Switch } from 'antd'
+import { App as AntApp, Button, Form, Input, List, Popconfirm, Switch } from 'antd'
+import { CloseOutlined, PlusOutlined, CodeOutlined, SafetyOutlined, KeyOutlined, SnippetsOutlined } from '@ant-design/icons'
 import { invokeAs, describeError } from '../bridge'
 import { t } from '../i18n'
 import type { PluginSettings, QuickCommand, TreeCommand } from '../types'
@@ -30,6 +31,7 @@ const toList = (value: unknown): string[] =>
 // 面板里没有保存按钮：每一项改完就落盘。文本域走防抖，停手一会儿再写，
 // 免得每敲一个字符过一遍桥、也免得半截输入被当成最终值。
 export function SettingsPanel({ settings, onSaved }: Props) {
+  const [section, setSection] = useState('terminal')
   const [form] = Form.useForm()
   const { message } = AntApp.useApp()
   const [hosts, setHosts] = useState<KnownHost[]>([])
@@ -72,6 +74,7 @@ export function SettingsPanel({ settings, onSaved }: Props) {
   const persist = useCallback(async () => {
     const v = latest.current
     const next: PluginSettings = {
+      ...settings,
       readOnly: !!v.readOnly,
       sudoAllowlist: toList(v.sudoAllowlist),
       readOnlyExecAllowlist: toList(v.readOnlyExec),
@@ -115,87 +118,108 @@ export function SettingsPanel({ settings, onSaved }: Props) {
 
   return (
     <div className="settings-wrap">
-      <Card title={t('tab.settings')} style={{ maxWidth: 760, marginBottom: 16 }}>
-        <Form
-          form={form}
-          layout="vertical"
-          // 任何一项变动都排一次落盘。值缓存下来给 persist 用，见上。
-          onValuesChange={(_, all) => { latest.current = all; scheduleSave() }}
-        >
-          <Form.Item name="readOnly" valuePropName="checked" label={t('settings.readOnly')}>
+      <div className="settings-layout">
+      <nav className="settings-nav" aria-label={t('tab.settings')}>
+        {[
+          { key: 'terminal', label: t('tab.terminals'), icon: <CodeOutlined aria-hidden /> },
+          { key: 'commands', label: t('settings.quick'), icon: <SnippetsOutlined aria-hidden /> },
+          { key: 'security', label: t('settings.security'), icon: <SafetyOutlined aria-hidden /> },
+          { key: 'hosts', label: t('settings.knownHosts'), icon: <KeyOutlined aria-hidden /> },
+        ].map(item => <button type="button" key={item.key} aria-pressed={section === item.key} aria-controls={`settings-${item.key}`}
+          onClick={() => setSection(item.key)}>{item.icon}<span>{item.label}</span></button>)}
+      </nav>
+      <div className="settings-content">
+      <Form
+        form={form}
+        layout="vertical"
+        // 任何一项变动都排一次落盘。值缓存下来给 persist 用，见上。
+        onValuesChange={(_, all) => { latest.current = all; scheduleSave() }}
+      >
+        <div id="settings-terminal" hidden={section !== 'terminal'}>
+        <section className="settings-section">
+          <h2>{t('tab.terminals')}</h2>
+          <Form.Item className="setting-toggle" name="localEcho" valuePropName="checked" label={t('settings.localEcho')}>
+            <Switch />
+          </Form.Item>
+          <Form.Item className="setting-toggle" name="showFileTree" valuePropName="checked" label={t('settings.showFileTree')}>
+            <Switch />
+          </Form.Item>
+        </section>
+        <section className="settings-section">
+          <h2>{t('settings.treeCommands')}</h2>
+          <Form.List name="treeCommands">
+            {(fields, { add, remove }) => (
+              <>
+                {fields.length > 0 && <div className="settings-command-head" aria-hidden><span>{t('settings.treeName')}</span><span>{t('settings.treePath')}</span></div>}
+                {fields.map(field => (
+                  <div key={field.key} className="settings-command-row">
+                    <Form.Item name={[field.name, 'name']} noStyle>
+                      <Input prefix="#" aria-label={t('settings.treeName')} placeholder="logs" />
+                    </Form.Item>
+                    <Form.Item name={[field.name, 'path']} noStyle>
+                      <Input aria-label={t('settings.treePath')} placeholder="/var/log" />
+                    </Form.Item>
+                    <Popconfirm title={t('conn.delete')} onConfirm={() => remove(field.name)}>
+                      <Button type="text" icon={<CloseOutlined />} aria-label={t('conn.delete')} />
+                    </Popconfirm>
+                  </div>
+                ))}
+                <Button type="text" icon={<PlusOutlined />} onClick={() => add({ name: '', path: '' })}>
+                  {t('conn.new')}
+                </Button>
+              </>
+            )}
+          </Form.List>
+        </section>
+        </div>
+        <section className="settings-section" id="settings-commands" hidden={section !== 'commands'}>
+          <h2>{t('settings.quick')}</h2>
+          <Form.List name="quickCommands">
+            {(fields, { add, remove }) => (
+              <>
+                {fields.length > 0 && <div className="settings-command-head" aria-hidden><span>{t('settings.quickName')}</span><span>{t('settings.quickCommand')}</span></div>}
+                {fields.map(field => (
+                  <div key={field.key} className="settings-command-row">
+                    <Form.Item name={[field.name, 'name']} noStyle>
+                      <Input aria-label={t('settings.quickName')} placeholder={t('settings.quickName')} />
+                    </Form.Item>
+                    <Form.Item name={[field.name, 'command']} noStyle>
+                      <Input className="code-input" aria-label={t('settings.quickCommand')} placeholder="df -h" />
+                    </Form.Item>
+                    <Popconfirm title={t('conn.delete')} onConfirm={() => remove(field.name)}>
+                      <Button type="text" icon={<CloseOutlined />} aria-label={t('conn.delete')} />
+                    </Popconfirm>
+                  </div>
+                ))}
+                <Button type="text" icon={<PlusOutlined />} onClick={() => add({ name: '', command: '' })}>
+                  {t('settings.addCommand')}
+                </Button>
+              </>
+            )}
+          </Form.List>
+        </section>
+        <section className="settings-section" id="settings-security" hidden={section !== 'security'}>
+          <h2>{t('settings.security')}</h2>
+          <Form.Item className="setting-toggle" name="readOnly" valuePropName="checked" label={t('settings.readOnly')}>
             <Switch />
           </Form.Item>
           <Form.Item name="readOnlyExec" label={t('settings.readOnlyExec')}>
-            <Input.TextArea rows={3} style={{ fontFamily: 'Consolas, monospace' }} />
-          </Form.Item>
-          <Form.Item name="localEcho" valuePropName="checked" label={t('settings.localEcho')}>
-            <Switch />
-          </Form.Item>
-          <Form.Item name="showFileTree" valuePropName="checked" label={t('settings.showFileTree')}>
-            <Switch />
-          </Form.Item>
-          <Form.Item label={t('settings.treeCommands')} extra={t('settings.treeHint')}>
-            <Form.List name="treeCommands">
-              {(fields, { add, remove }) => (
-                <>
-                  {fields.map(field => (
-                    <Space key={field.key} style={{ display: 'flex', marginBottom: 4 }} align="baseline">
-                      <Form.Item name={[field.name, 'name']} noStyle>
-                        <Input placeholder={t('settings.treeName')} style={{ width: 200 }} />
-                      </Form.Item>
-                      <Form.Item name={[field.name, 'path']} noStyle>
-                        <Input placeholder={t('settings.treePath')} style={{ width: 360 }} />
-                      </Form.Item>
-                      <Popconfirm title="?" onConfirm={() => remove(field.name)}>
-                        <a>✕</a>
-                      </Popconfirm>
-                    </Space>
-                  ))}
-                  <Button size="small" onClick={() => add({ name: '', path: '' })}>
-                    + {t('settings.treeCommands')}
-                  </Button>
-                </>
-              )}
-            </Form.List>
+            <Input.TextArea className="code-input" rows={3} placeholder={'uptime\nfree -m'} />
           </Form.Item>
           <Form.Item name="dangerous" label={t('settings.dangerous')}>
-            <Input.TextArea rows={3} style={{ fontFamily: 'Consolas, monospace' }} placeholder="rm -rf ; mkfs ; dd if= ; shutdown" />
+            <Input.TextArea className="code-input" rows={3} placeholder={'rm -rf\nmkfs\ndd if='} />
           </Form.Item>
           <Form.Item name="localPaths" label={t('settings.paths')}>
-            <Input.TextArea rows={2} style={{ fontFamily: 'Consolas, monospace' }} />
+            <Input.TextArea className="code-input" rows={2} />
           </Form.Item>
           <Form.Item name="sudoAllowlist" label={t('settings.sudo')}>
-            <Input.TextArea rows={6} style={{ fontFamily: 'Consolas, monospace' }} />
+            <Input.TextArea className="code-input" rows={3} />
           </Form.Item>
-          <Form.Item label={t('settings.quick')}>
-            <Form.List name="quickCommands">
-              {(fields, { add, remove }) => (
-                <>
-                  {fields.map(field => (
-                    <Space key={field.key} style={{ display: 'flex', marginBottom: 4 }} align="baseline">
-                      <Form.Item name={[field.name, 'name']} noStyle>
-                        <Input placeholder={t('settings.quickName')} style={{ width: 140 }} />
-                      </Form.Item>
-                      <Form.Item name={[field.name, 'command']} noStyle>
-                        <Input placeholder={t('settings.quickCommand')} style={{ width: 420 }} />
-                      </Form.Item>
-                      <Popconfirm title="?" onConfirm={() => remove(field.name)}>
-                        <a>✕</a>
-                      </Popconfirm>
-                    </Space>
-                  ))}
-                  <Button size="small" onClick={() => add({ name: '', command: '' })}>
-                    + {t('settings.quick')}
-                  </Button>
-                </>
-              )}
-            </Form.List>
-          </Form.Item>
-        </Form>
-      </Card>
-      <Card title={t('settings.knownHosts')} style={{ maxWidth: 760 }} extra={
-        <Button size="small" onClick={loadHosts}>{t('sftp.refresh')}</Button>
-      }>
+        </section>
+      </Form>
+      <section className="settings-section" id="settings-hosts" hidden={section !== 'hosts'}>
+        <h2>{t('settings.knownHosts')}</h2>
+        <Button size="small" type="text" onClick={loadHosts}>{t('sftp.refresh')}</Button>
         <List
           size="small"
           dataSource={hosts}
@@ -215,7 +239,7 @@ export function SettingsPanel({ settings, onSaved }: Props) {
                     }
                   }}
                 >
-                  <a>{t('conn.delete')}</a>
+                  <Button type="text" danger>{t('conn.delete')}</Button>
                 </Popconfirm>,
               ]}
             >
@@ -226,7 +250,9 @@ export function SettingsPanel({ settings, onSaved }: Props) {
             </List.Item>
           )}
         />
-      </Card>
+      </section>
+      </div>
+      </div>
     </div>
   )
 }

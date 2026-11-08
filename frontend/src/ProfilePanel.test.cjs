@@ -59,11 +59,12 @@ function fixture(invoke = async () => ({})) {
     for (const effect of scheduled.splice(0)) effect()
     return tree
   }
-  function find(predicate, node = tree) {
+  function find(predicate, node) {
+    if (arguments.length === 1) node = tree
     if (!node || typeof node !== 'object') return undefined
     if (Array.isArray(node)) { for (const child of node) { const found = find(predicate, child); if (found) return found } return undefined }
     if (predicate(node)) return node
-    return node.props?.children === undefined ? undefined : find(predicate, node.props.children)
+    return find(predicate, node.props?.children)
   }
   render()
   return { props, render, find, calls, messages, refresh, form, unmount() { for (const effect of effects) effect?.cleanup?.() } }
@@ -98,8 +99,10 @@ test('the final disconnected session can be closed before a null verification sn
 test('single profile confirmation accepts the same null connection response', async () => {
   const view = fixture(async command => command === 'conn.status' ? { connections: null } : {})
   try {
-    const confirm = view.find(node => node.type === 'Popconfirm')
-    await confirm.props.onConfirm()
+    view.find(node => node.type === 'Dropdown' && node.props.menu.items.some(item => item.key === 'delete')).props.menu.onClick({ key: 'delete' })
+    assert.equal(view.calls.length, 0, 'single deletion also waits for confirmation')
+    view.render()
+    await view.find(node => node.type === 'Modal' && node.props.open).props.onOk()
     assert.deepEqual(view.calls.filter(call => call.command === 'profile.delete').map(call => call.args.id), ['a'])
     assert.equal(view.messages.some(message => message.type === 'error'), false)
   } finally { view.unmount() }
@@ -119,6 +122,7 @@ test('missing or malformed connection responses remain fail-closed', async () =>
 
 test('partial selection survives refresh while removed profiles are pruned and can be deselected', () => {
   const view = fixture()
+  enterSelection(view)
   const select = view.find(node => node.type === 'Checkbox' && node.props['aria-label']?.startsWith('conn.selectProfile:'))
   select.props.onChange({ target: { checked: true } })
   view.render()
@@ -150,7 +154,7 @@ test('batch selection and deletion messages exist in all six locale catalogs wit
   const source = fs.readFileSync(path.join(__dirname, 'i18n.ts'), 'utf8')
   const ast = ts.createSourceFile('i18n.ts', source, ts.ScriptTarget.Latest, true)
   const dictionaries = ast.statements.filter(ts.isVariableStatement).flatMap(s => [...s.declarationList.declarations]).filter(d => ['zhCN', 'zhTW', 'en', 'ja', 'de', 'ru'].includes(d.name.getText(ast)))
-  const required = ['conn.selectAll', 'conn.selectProfile', 'conn.selectedCount', 'conn.deleteSelected', 'conn.deleteSelectedConfirm', 'conn.deleteProfilesOnly', 'conn.deleteStillActive', 'conn.deletedCount', 'conn.deleteFailedCount', 'conn.statusInvalid']
+  const required = ['form.advanced', 'sftp.source', 'sftp.columnName', 'sftp.columnSize', 'sftp.columnModified', 'sftp.actions', 'sftp.closeUsage', 'sftp.activeTransfers', 'sftp.attentionTransfers', 'conn.actions', 'conn.search', 'conn.batchSelect', 'conn.endSelection', 'conn.noMatches', 'conn.showSidebar', 'conn.hideSidebar', 'conn.resize', 'conn.selectAll', 'conn.selectProfile', 'conn.selectedCount', 'conn.deleteSelected', 'conn.deleteSelectedConfirm', 'conn.deleteProfilesOnly', 'conn.deleteStillActive', 'conn.deletedCount', 'conn.deleteFailedCount', 'conn.statusInvalid']
   assert.equal(dictionaries.length, 6)
   for (const dict of dictionaries) {
     const keys = dict.initializer.properties.map(p => p.name.text)
@@ -160,7 +164,13 @@ test('batch selection and deletion messages exist in all six locale catalogs wit
 })
 
 
+function enterSelection(view) {
+  view.find(node => node.type === 'Dropdown' && node.props.menu.items.some(item => item.key === 'select')).props.menu.onClick({ key: 'select' })
+  view.render()
+}
+
 function selectAllAndConfirm(view) {
+  enterSelection(view)
   const all = view.find(node => node.type === 'Checkbox' && node.props['aria-label'] === 'conn.selectAll')
   assert.ok(all)
   all.props.onChange({ target: { checked: true } })
@@ -225,16 +235,45 @@ test('repeated confirmation cannot issue duplicate deletions and a failed delete
 })
 
 
-test('long connection names retain their complete title and do not share the authentication tag row', () => {
+test('connection rows open their profile and pending connections cannot be reopened', () => {
+  const view = fixture()
+  const opened = []
+  view.props.onConnect = profile => opened.push(profile.id)
+  view.props.activeProfileId = 'a'
+  view.render()
+  const row = view.find(node => node.props?.className === 'conn-open')
+  row.props.onClick()
+  assert.deepEqual(opened, ['a'])
+  assert.equal(row.props['aria-current'], true)
+  view.props.connections = [{ profileId: 'a', state: 'connecting' }]
+  view.render()
+  assert.equal(view.find(node => node.props?.className === 'conn-open').props.disabled, true)
+  view.unmount()
+})
+
+test('invalid jump fields reopen the advanced section and never submit the profile', async () => {
+  const view = fixture()
+  try {
+    const details = view.find(node => node.props?.className === 'profile-advanced')
+    details.props.ref.current = { open: false }
+    view.form.validateFields = async () => { throw { errorFields: [{ name: ['jumps', 0, 'host'], errors: ['required'] }] } }
+    const editor = view.find(node => node.type === 'Modal' && node.props.className === 'profile-editor')
+    await editor.props.footer.find(button => button.props.children === 'form.save').props.onClick()
+    assert.equal(details.props.ref.current.open, true)
+    assert.equal(view.calls.some(call => call.command === 'profile.save'), false)
+  } finally { view.unmount() }
+})
+
+test('long connection names retain their complete title without redundant authentication tags', () => {
   const view = fixture()
   const name = view.find(node => node.props?.className === 'conn-name')
   assert.equal(name.props.title, view.props.profiles[0].name)
-  const main = view.find(node => node.props?.className === 'conn-card-name')
-  assert.ok(view.find(node => node.props?.className === 'conn-card-tags', main), 'tags need a separate shrink-safe row')
+  assert.equal(view.find(node => node.props?.className === 'conn-card-tags'), undefined)
 })
 
 test('selection has all/partial states and never deletes before confirmation', async () => {
   const view = fixture()
+  enterSelection(view)
   const all = view.find(node => node.type === 'Checkbox' && node.props['aria-label'] === 'conn.selectAll')
   assert.ok(all, 'profile list needs a select-all control')
   assert.equal(all.props.checked, false)
@@ -277,3 +316,31 @@ test('validation failures stay inside the dialog instead of escaping as unhandle
   view.unmount()
 })
 
+
+
+test('search matches names, addresses and users without selecting hidden profiles', async () => {
+  const view = fixture(async command => command === 'conn.status' ? { connections: [] } : {})
+  const search = value => { view.find(n => n.props?.className === 'profile-search').props.onChange({ target: { value } }); view.render() }
+  try {
+    assert.equal(view.find(n => n.type === 'Checkbox'), undefined, 'normal navigation has no batch controls')
+    search(' HOST-B ')
+    assert.equal(view.find(n => n.props?.className === 'conn-name').props.title, 'Second')
+    enterSelection(view)
+    view.find(n => n.props?.['aria-label'] === 'conn.selectAll').props.onChange({ target: { checked: true } })
+    view.render()
+    search('OPS@HOST-A')
+    assert.equal(view.find(n => n.props?.['aria-label'] === 'conn.deleteSelected').props.disabled, true, 'changing the search clears earlier selections')
+    const dialog = selectAllAndConfirm(view)
+    assert.equal(view.calls.length, 0, 'filtering and selection must never delete immediately')
+    await dialog.props.onOk()
+    assert.deepEqual(view.calls.filter(c => c.command === 'profile.delete').map(c => c.args.id), ['a'], 'only the visible, confirmed profile can be deleted')
+    view.render()
+    view.find(n => n.props?.['aria-label'] === 'conn.endSelection').props.onClick()
+    view.render()
+    assert.equal(view.find(n => n.type === 'Checkbox'), undefined)
+    search('no matching server')
+    assert.ok(view.find(n => n.props?.className === 'profile-no-results'))
+    search('second')
+    assert.equal(view.find(n => n.props?.className === 'conn-name').props.title, 'Second')
+  } finally { view.unmount() }
+})

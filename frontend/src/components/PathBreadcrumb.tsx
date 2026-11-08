@@ -1,3 +1,5 @@
+import { FolderFilled } from '@ant-design/icons'
+
 const BACKSLASH = String.fromCharCode(92)
 
 /** 路径 → 可点击的层级；支持 POSIX、盘符与 UNC（本地栏在用）。 */
@@ -54,14 +56,14 @@ export function PathBreadcrumb({
   const segs = splitPathSegments(path, homeHint)
   const go = (p: string) => { if (!disabled) onNavigate(p) }
   if (segs.length === 0) {
-    return <span className="crumb root" aria-disabled={disabled} onClick={() => go('')}>{emptyLabel ?? '—'}</span>
+    return <button type="button" className="crumb root" disabled={disabled} onClick={() => go('')}>{emptyLabel ?? '—'}</button>
   }
   return (
     <div className="path-breadcrumb" aria-disabled={disabled}>
       {segs.map((seg, i) => (
         <span key={i} className="crumb">
-          <span className="crumb-icon">📁</span>
-          <a title={seg.full} aria-disabled={disabled} onClick={() => go(seg.full)}>{seg.label}</a>
+          {i === 0 && <FolderFilled className="crumb-icon file-icon-folder" aria-hidden />}
+          <button type="button" title={seg.full} disabled={disabled} onClick={() => go(seg.full)}>{seg.label}</button>
           {i < segs.length - 1 && <span className="crumb-sep">›</span>}
         </span>
       ))}

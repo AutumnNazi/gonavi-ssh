@@ -192,3 +192,56 @@ test('a save invalidated by opening another file never writes the old path', asy
   assert.equal(view.modal().props.title, 'sftp.preview: /B', '过期保存不能把界面拉回 A')
   assert.equal(view.closed(), 0, '过期的保存完成不该顺手关掉 B 的窗口')
 })
+
+test('saving one file leaves the next preview editable and saveable', async () => {
+  const view = fixture(async command => command === 'sftp.preview' ? { dataBase64: 'before' } : {})
+  for (const name of ['A', 'B']) {
+    await view.open(at('/' + name, name))
+    assert.equal(view.modal().props.okButtonProps.loading, false)
+    view.textarea().props.onChange({ target: { value: name + ' edited' } })
+    await view.settle()
+    view.modal().props.onOk()
+    await view.settle()
+  }
+  assert.deepEqual(view.writes().map(call => call.args.dataBase64), ['A edited', 'B edited'])
+})
+
+test('an unread preview cannot replace the remote file with an empty draft', async () => {
+  const reading = deferred()
+  const view = fixture(async command => command === 'sftp.preview' ? reading.promise : {})
+  await view.open(at('/A', 'A'))
+  assert.equal(view.modal().props.okButtonProps.disabled, true)
+  view.modal().props.onOk()
+  await view.settle()
+  assert.equal(view.writes().length, 0)
+  reading.resolve({ dataBase64: 'loaded' })
+  await view.settle()
+  assert.equal(view.modal().props.okButtonProps.disabled, false)
+})
+
+test('closing a preview discards its late read error', async () => {
+  const reading = deferred()
+  const view = fixture(async () => reading.promise)
+  await view.open(at('/A', 'A'))
+  view.modal().props.onCancel()
+  await view.settle()
+  reading.reject(new Error('obsolete read failed'))
+  await view.settle()
+  assert.deepEqual(view.messages, [])
+  assert.equal(view.closed(), 1)
+})
+
+test('closing during a save does not notify or refresh a different connection', async () => {
+  const writing = deferred(), saved = []
+  const view = fixture(async command => command === 'sftp.preview' ? { dataBase64: 'loaded' } : writing.promise)
+  view.props.onSaved = target => saved.push(target.path)
+  await view.open(at('/A', 'A'))
+  view.modal().props.onOk()
+  view.modal().props.onCancel()
+  await view.settle()
+  writing.resolve({})
+  await view.settle()
+  assert.deepEqual(saved, [])
+  assert.equal(view.closed(), 1)
+  assert.deepEqual(view.messages, [])
+})

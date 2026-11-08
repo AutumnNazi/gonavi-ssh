@@ -106,13 +106,13 @@ function fixture(invoke = async () => ({})) {
   return { props, render, settle, find, calls, timers, messages, modals, unmount() { for (const e of effects) e?.cleanup?.(); timers.clear() } }
 }
 
-test('first explicit local to remote switch resolves its default and opens it immediately', async () => {
+test('choosing a server from a local pane opens exactly that server', async () => {
   const view = fixture(async (command, args) => command === 'conn.open' ? { profileId: args.profileId, connectionId: 'new-' + args.profileId, state: 'ready', alive: true } : command === 'fs.listLocal' ? { entries: [], home: '' } : command === 'sftp.list' ? { entries: [], more: false } : { tasks: [] })
   try {
     await view.settle()
-    view.find(node => node.type === 'Segmented' && node.props.value === 'local').props.onChange('remote')
+    source(view, 'left').props.onChange('remote:b')
     await view.settle()
-    assert.deepEqual(view.calls.filter(call => call.command === 'conn.open').map(call => call.args.profileId), ['b'], 'first explicit switch must open default b rather than leave an offline selection')
+    assert.deepEqual(view.calls.filter(call => call.command === 'conn.open').map(call => call.args.profileId), ['b'], 'a source choice must open the chosen server without opening another default')
   } finally { view.unmount() }
 })
 
@@ -126,7 +126,7 @@ test('late server A list cannot become a server B deletion source', async () => 
     await view.settle()
     view.props.connections = [...view.props.connections, { profileId: 'b', connectionId: 'ready-b', state: 'ready', alive: true }]
     await view.settle()
-    view.find(node => node.type === 'Select' && node.props.className === 'pane-source').props.onChange('b')
+    source(view).props.onChange('remote:b')
     await view.settle()
     const pane = () => view.find(node => node.props?.className === 'fs-pane fs-pane-remote')
     const list = () => view.find(node => node.type === 'List', pane())
@@ -135,7 +135,7 @@ test('late server A list cannot become a server B deletion source', async () => 
     await view.settle()
     rowOf(list()).props.onClick()
     await view.settle()
-    await view.find(node => node.type === 'Button' && node.props['aria-label'] === 'sftp.remove', pane()).props.onClick()
+    await button(view, 'sftp.remove').props.onClick()
 
     assert.deepEqual(JSON.parse(JSON.stringify(view.calls.filter(call => call.command === 'sftp.remove').map(call => call.args))), [{ connectionId: 'ready-b', path: entryB.path }], 'late A must never send server B a deletion for path A')
     assert.equal(list().props.dataSource[0].path, entryB.path)
@@ -172,11 +172,11 @@ test('left remote pane also remains disconnected after the connection disappears
   const view = fixture(async (command, args) => command === 'conn.open' ? { profileId: args.profileId, connectionId: 'new-' + args.profileId, state: 'ready', alive: true } : command === 'sftp.list' ? { entries: [{ name: 'remote.txt', path: '/remote.txt' }], more: false } : command === 'fs.listLocal' ? { entries: [], home: '' } : { tasks: [] })
   try {
     await view.settle()
-    const left = view.find(node => node.type === 'Segmented' && node.props.value === 'local')
-    left.props.onChange('remote')
+    const left = source(view, 'left')
+    left.props.onChange('remote:b')
     await view.settle()
-    const select = view.find(node => node.type === 'Select' && node.props.className === 'pane-source')
-    select.props.onChange('b')
+    const select = source(view, 'left')
+    select.props.onChange('remote:b')
     await view.settle()
     view.props.connections = [{ profileId: 'b', connectionId: 'ready-b', state: 'ready', alive: true }]
     await view.settle()
@@ -234,7 +234,7 @@ test('selecting an offline server or explicitly connecting still requests a conn
     connect.props.onClick(); await view.settle()
     assert.equal(view.calls.filter(c => c.command === 'conn.open').length, 1)
     view.calls.length = 0
-    view.find(node => node.type === 'Select' && node.props.className === 'pane-source').props.onChange('b')
+    source(view).props.onChange('remote:b')
     await view.settle()
     assert.deepEqual(view.calls.filter(c => c.command === 'conn.open').map(c => c.args.profileId), ['b'])
   } finally { view.unmount() }
@@ -246,10 +246,16 @@ function deferred() {
   return { promise, resolve, reject }
 }
 function pane(view, side = 'right') { return view.find(node => node.props?.className === 'sftp-columns').props.children[side === 'left' ? 0 : 1] }
+function source(view, side = 'right') { return view.find(node => node.type === 'Select' && node.props.className === 'pane-source', pane(view, side)) }
 function listing(view, side = 'right') { return view.find(node => node.type === 'List', pane(view, side)) }
 // 远端栏的具名图标按钮统一用 aria-label 定位：它们的提示改由外层 Tooltip 承担
 // （disabled 的原生 title 不显示），aria-label 不受这层包装影响。
-function button(view, label, side = 'right') { return view.find(node => node.type === 'Button' && node.props['aria-label'] === label, pane(view, side)) }
+function button(view, label, side = 'right') {
+  const direct = view.find(node => node.type === 'Button' && node.props['aria-label'] === label, pane(view, side))
+  const menu = view.find(node => node.type === 'Dropdown' && node.props.trigger?.includes('click'), pane(view, side))?.props.menu
+  const item = menu?.items.find(item => item.label === label)
+  return direct ?? (item && { props: { onClick: item.onClick, disabled: item.disabled } })
+}
 function navigate(view, target, side = 'right') { view.find(node => node.props?.onNavigate, pane(view, side)).props.onNavigate(target) }
 function entry(name) { return { name, path: '/' + name, isDir: false, size: 1 } }
 function basic(command) { return command === 'fs.listLocal' ? { entries: [], home: '' } : { tasks: [] } }
@@ -348,7 +354,7 @@ for (const change of ['disconnect', 'mode', 'profile', 'path', 'refresh', 'ABA',
       await view.settle(); hold = true
       button(view, 'sftp.refresh').props.onClick(); hold = false
       if (change === 'disconnect') { view.props.connections = []; view.render() }
-      if (change === 'mode') view.find(node => node.type === 'Segmented', pane(view)).props.onChange('local')
+      if (change === 'mode') source(view).props.onChange('local')
       if (change === 'profile') view.find(node => node.type === 'Select', pane(view)).props.onChange('b')
       if (change === 'path' || change === 'ABA') { navigate(view, '/other'); if (change === 'ABA') navigate(view, '.') }
       if (change === 'refresh') button(view, 'sftp.refresh').props.onClick()
@@ -402,12 +408,12 @@ test('local list cannot overwrite remote or another local path and resolves actu
   const pending = deferred(); let localCalls = 0
   const view = fixture(async command => command === 'fs.listLocal' ? ++localCalls === 1 ? pending.promise : { entries: [entry('local-current')], home: '/actual-home' } : command === 'sftp.list' ? { entries: [entry('remote-current')], more: false } : { tasks: [] })
   try {
-    await view.settle(); view.find(node => node.type === 'Segmented', pane(view, 'left')).props.onChange('remote'); await view.settle()
+    await view.settle(); source(view, 'left').props.onChange('remote:b'); await view.settle()
     view.props.connections = [...view.props.connections, { profileId: 'b', connectionId: 'ready-b', state: 'ready', alive: true }]; await view.settle()
     pending.resolve({ entries: [entry('stale-local')], home: '/old-home' }); await view.settle()
     assert.equal(listing(view, 'left').props.dataSource[0].name, 'remote-current')
     view.calls.length = 0
-    view.find(node => node.type === 'Segmented', pane(view, 'left')).props.onChange('local'); await view.settle()
+    source(view, 'left').props.onChange('local'); await view.settle()
     assert.equal(view.calls.some(call => call.command === 'sftp.list'), false, 'switch back must not issue remote list from previous closure')
     assert.equal(listing(view, 'left').props.dataSource[0].name, 'local-current')
     assert.equal(view.find(node => node.props?.onNavigate, pane(view, 'left')).props.path, '/actual-home')
@@ -457,20 +463,20 @@ for (const state of ['cancelled', 'failed', 'needInput']) test('open terminal st
 test('a deleted left profile resolves the new default only on explicit mode switch', async () => {
   const view = fixture(async (command, args) => command === 'conn.open' ? { profileId: args.profileId, connectionId: 'new-' + args.profileId, state: 'ready' } : command === 'sftp.list' ? { entries: [], more: false } : basic(command))
   try {
-    await view.settle(); view.find(node => node.type === 'Segmented', pane(view, 'left')).props.onChange('remote'); await view.settle()
-    view.find(node => node.type === 'Segmented', pane(view, 'left')).props.onChange('local'); await view.settle()
+    await view.settle(); source(view, 'left').props.onChange('remote:b'); await view.settle()
+    source(view, 'left').props.onChange('local'); await view.settle()
     view.props.profiles = [view.props.profiles[0], { ...view.props.profiles[1], id: 'c' }]; await view.settle(); view.calls.length = 0
-    view.find(node => node.type === 'Segmented', pane(view, 'left')).props.onChange('remote'); await view.settle()
+    source(view, 'left').props.onChange('remote:b'); await view.settle()
     assert.deepEqual(view.calls.filter(call => call.command === 'conn.open').map(call => call.args.profileId), ['c'])
   } finally { view.unmount() }
 })
 test('right explicit mode switch prefers an existing ready profile without reopening it', async () => {
   const view = fixture(async command => command === 'sftp.list' ? { entries: [], more: false } : basic(command))
   try {
-    await view.settle(); view.find(node => node.type === 'Segmented', pane(view)).props.onChange('local'); await view.settle()
+    await view.settle(); source(view).props.onChange('local'); await view.settle()
     view.props.profiles = [view.props.profiles[1], { ...view.props.profiles[0], id: 'c' }]; view.props.connections = [{ profileId: 'c', connectionId: 'ready-c', state: 'ready', alive: true }]; await view.settle(); view.calls.length = 0
-    view.find(node => node.type === 'Segmented', pane(view)).props.onChange('remote'); await view.settle()
-    assert.equal(view.find(node => node.type === 'Select', pane(view)).props.value, 'c')
+    source(view).props.onChange('remote:a'); await view.settle()
+    assert.equal(view.find(node => node.type === 'Select', pane(view)).props.value, 'remote:c')
     assert.equal(view.calls.some(call => call.command === 'conn.open'), false)
     assert.equal(view.calls.filter(call => call.command === 'sftp.list')[0].args.connectionId, 'ready-c')
   } finally { view.unmount() }
@@ -481,7 +487,7 @@ for (const change of ['disconnect', 'mode', 'profile', 'path', 'ABA', 'unmount']
   try {
     await view.settle(); hold = true; button(view, 'sftp.refresh').props.onClick(); hold = false
     if (change === 'disconnect') { view.props.connections = []; view.render() }
-    if (change === 'mode') view.find(node => node.type === 'Segmented', pane(view)).props.onChange('local')
+    if (change === 'mode') source(view).props.onChange('local')
     if (change === 'profile') view.find(node => node.type === 'Select', pane(view)).props.onChange('b')
     if (change === 'path' || change === 'ABA') { navigate(view, '/other'); if (change === 'ABA') navigate(view, '') }
     if (change === 'unmount') view.unmount(); else await view.settle()
@@ -528,7 +534,7 @@ test('an interrupted transfer explains the cause and offers resume', async () =>
     const row = view.find(node => node.props?.className === 'transfer-row')
     assert.ok(row, '中断的传输必须留在传输列表里')
     assert.ok(view.find(node => node.type === 'Tooltip' && node.props.title === 'sftp.interruptedHint', row), '关窗打断的传输要标注原因，而不是只留一个状态词')
-    const resume = view.find(node => node.type === 'a' && node.props.children === 'sftp.retry', row)
+    const resume = view.find(node => node.type === 'Button' && node.props.children === 'sftp.retry', row)
     assert.ok(resume, '中断的传输必须给出续传入口')
     resume.props.onClick()
     await view.settle()
@@ -539,3 +545,35 @@ test('an interrupted transfer explains the cause and offers resume', async () =>
 // 只读模式下后端会拒掉写命令：按钮还亮着的话用户点了才被弹回错误。
 // 远端栏的具名按钮统一按 aria-label 定位（见 button()）。
 
+
+
+test('transfer shelf stays compact when idle and keeps all task actions after collapse and refresh', async () => {
+  let tasks = []
+  const view = fixture(async command => command === 'transfer.list' ? { tasks } : command === 'sftp.list' ? { entries: [] } : basic(command))
+  const toggle = () => view.find(n => n.props?.className === 'transfers-toggle')
+  const rows = () => { const result = []; view.find(n => { if (n.props?.className === 'transfer-row') result.push(n); return false }); return result }
+  const poll = async () => { const [id, run] = [...view.timers.entries()].at(-1); view.timers.delete(id); await run(); await view.settle() }
+  try {
+    await view.settle()
+    assert.equal(toggle().props.disabled, true)
+    assert.equal(view.find(n => n.props?.id === 'transfer-list'), undefined)
+    tasks = Array.from({ length: 14 }, (_, i) => ({ id: String(i), connectionId: 'ready-a', direction: 'upload', localPath: '/local/' + i, remotePath: '/remote/' + i, state: i === 13 ? 'interrupted' : i === 0 ? 'running' : 'done', totalBytes: 100, bytesDone: 20 }))
+    await poll()
+    assert.equal(toggle().props['aria-expanded'], true)
+    assert.equal(rows().length, 14, 'tasks beyond the first twelve must remain accessible')
+    toggle().props.onClick(); view.render()
+    assert.equal(view.find(n => n.props?.id === 'transfer-list'), undefined)
+    assert.ok(view.find(n => n.props?.className === 'transfer-attention'), 'collapsed queue must still expose problems')
+    tasks = [...tasks, { ...tasks[0], id: '14', state: 'queued' }]
+    await poll()
+    assert.equal(toggle().props['aria-expanded'], false, 'polling must respect the chosen collapsed state')
+    toggle().props.onClick(); view.render()
+    assert.equal(rows().length, 15)
+    const last = rows().at(-1)
+    await view.find(n => n.type === 'Button' && n.props.children === 'sftp.cancelTransfer', last).props.onClick()
+    assert.equal(view.calls.find(c => c.command === 'transfer.cancel').args.taskId, '14')
+    const interrupted = rows()[13]
+    await view.find(n => n.type === 'Button' && n.props.children === 'sftp.retry', interrupted).props.onClick()
+    assert.equal(view.calls.find(c => c.command === 'transfer.retry').args.taskId, '13')
+  } finally { view.unmount() }
+})

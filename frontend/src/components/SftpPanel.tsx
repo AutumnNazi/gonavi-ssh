@@ -7,12 +7,10 @@ import {
   message,
   Modal,
   Progress,
-  Segmented,
   Select,
   Space,
   Tag,
   Tooltip,
-  Typography,
 } from 'antd'
 import {
   ArrowLeftOutlined,
@@ -21,17 +19,25 @@ import {
   CloseOutlined,
   CopyOutlined,
   DashboardOutlined,
+  DownOutlined,
   DeleteOutlined,
   EditOutlined,
   FolderAddOutlined,
+  FolderFilled,
+  HddOutlined,
+  LaptopOutlined,
+  FileOutlined,
+  LinkOutlined,
+  MoreOutlined,
   ReloadOutlined,
   RollbackOutlined,
   SwapOutlined,
+  UpOutlined,
 } from '@ant-design/icons'
 import { invokeAs, describeError } from '../bridge'
 import { copyToClipboard } from '../clipboard'
 import { FilePreviewModal } from './FilePreviewModal'
-import { fmtBytes, joinLocal, joinRemote } from '../fsFormat'
+import { fmtBytes, fmtMtime, joinLocal, joinRemote } from '../fsFormat'
 import { t } from '../i18n'
 import type { ConnectionInfo, FsEntry, ProfileView, TransferStatus } from '../types'
 import { PathBreadcrumb } from './PathBreadcrumb'
@@ -110,6 +116,10 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
   const rightNav = useNavHistory()
 
   const [transfers, setTransfers] = useState<TransferStatus[]>([])
+  const [transfersExpanded, setTransfersExpanded] = useState(true)
+  const showTransfers = transfers.length > 0 && transfersExpanded
+  const activeTransfers = transfers.filter(tr => tr.state === 'running' || tr.state === 'queued').length
+  const attentionTransfers = transfers.filter(tr => tr.state === 'failed' || tr.state === 'interrupted').length
   // 预览交给公共组件（filePreview 只留"打开的是哪一个"）。side 记下来是为了
   // 保存后能刷新对应那一栏的大小/时间。
   const [previewTarget, setPreviewTarget] = useState<{ connectionId: string; path: string; name: string; side: Side } | null>(null)
@@ -137,8 +147,9 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
 
   const profileOptions = useMemo(
     () => profiles.map(p => ({
-      value: p.id,
-      label: `${p.name} · ${p.user}@${p.host}:${p.port}`,
+      value: `remote:${p.id}`,
+      label: p.name,
+      title: `${p.user}@${p.host}:${p.port}`,
     })),
     [profiles],
   )
@@ -267,9 +278,9 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
   }
 
   // 切换本机/服务器：清空该栏历史与内容，避免两边路径混入同一份历史。
-  const switchKind = (side: Side, kind: PaneKind) => {
+  const switchKind = (side: Side, kind: PaneKind, selectedProfileId?: string) => {
     paneRequests.current[side].invalidate()
-    const current = side === 'left' ? leftProfileId : rightProfileId
+    const current = selectedProfileId ?? (side === 'left' ? leftProfileId : rightProfileId)
     const fallback = side === 'left'
       ? profiles.find(p => p.id !== rightProfileId)
       : profiles.find(p => connections.some(c => c.profileId === p.id && c.state === 'ready' && c.alive))
@@ -507,95 +518,71 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
     return (
       <div className={`fs-pane ${isLocal ? 'fs-pane-local' : 'fs-pane-remote'}`}>
         <div className="fs-pane-head">
-          <Segmented
-            size="small"
-            value={kind}
-            onChange={v => switchKind(side, v as PaneKind)}
-            options={[
-              { label: t('sftp.modeLocal'), value: 'local' },
-              { label: t('sftp.modeRemote'), value: 'remote' },
-            ]}
-          />
-          {isLocal ? (
-            <Tag color="green" bordered={false} style={{ marginRight: 0 }}>{t('sftp.local')}</Tag>
-          ) : (
+          <span className="pane-source-icon" aria-hidden>{isLocal ? <LaptopOutlined /> : <HddOutlined />}</span>
             <Select
-              size="small"
               className="pane-source"
-              value={profileId || undefined}
+              aria-label={t('sftp.source')}
+              variant="borderless"
+              value={isLocal ? 'local' : profileId ? `remote:${profileId}` : undefined}
               placeholder={t('sftp.pickProfile')}
-              style={{ flex: 1, minWidth: 130, maxWidth: 210 }}
-              options={profileOptions}
+              options={[{ value: 'local', label: t('sftp.modeLocal'), title: '' }, ...profileOptions]}
+              optionRender={option => <div className="source-option"><span>{option.label}</span>{option.data.title && <small>{option.data.title}</small>}</div>}
               onChange={v => {
-                paneRequests.current[side].invalidate()
-                if (side === 'left') {
-                  setLeftProfileId(v)
-                  setLeftPath('')
-                  setLeftEntries([])
-                  setLeftSel(null)
-                  leftNav.reset()
-                } else {
-                  setRightProfileId(v)
-                  setRightPath('')
-                  setRightEntries([])
-                  setRightSel(null)
-                  rightNav.reset()
-                }
-                void ensureConn(v)
+                switchKind(side, v === 'local' ? 'local' : 'remote', v === 'local' ? undefined : v.slice(7))
               }}
               loading={!!profileId && busyProfile === profileId}
               status={peerSame ? 'error' : undefined}
             />
-          )}
           {!isLocal && !conn && (
             <Button size="small" aria-label={t('conn.connect')} loading={!!profileId && busyProfile === profileId} disabled={!profileId} onClick={() => void ensureConn(profileId)}>
               {t('conn.connect')}
             </Button>
           )}
-          <span className="pane-head-spacer" />
-          {isLocal ? (
-            <Button size="small" type="primary" ghost icon={<ArrowUpOutlined />}
-              disabled={!(side === 'left' ? rightConn : leftConn)}
-              onClick={() => uploadFromPicker(side, sourceScope)}>
-              {t('sftp.upload')}
-            </Button>
-          ) : (
-            <Button size="small" type="primary" ghost icon={<SwapOutlined />}
-              disabled={isLocal ? !(side === 'left' ? rightConn : leftConn) : !conn}
-              onClick={() => sendToPeer(side, sourceScope)}>
-              {t('sftp.sendToPeer')}
-            </Button>
-          )}
         </div>
         <div className="pane-toolbar">
-          <Space size={4} wrap>
-            <Button size="small" icon={<ArrowLeftOutlined />} disabled={!nav.canBack}
+          <Space size={4}>
+            <Button type="text" size="small" icon={<ArrowLeftOutlined />} disabled={!nav.canBack}
               title={t('sftp.back')} onClick={() => navSide(side, 'back')} />
-            <Button size="small" icon={<ArrowRightOutlined />} disabled={!nav.canForward}
+            <Button type="text" size="small" icon={<ArrowRightOutlined />} disabled={!nav.canForward}
               title={t('sftp.forward')} onClick={() => navSide(side, 'forward')} />
-            <Button size="small" icon={<RollbackOutlined />} title={t('sftp.parent')}
+            <Button type="text" size="small" icon={<RollbackOutlined />} title={t('sftp.parent')}
               onClick={() => openSide(side, isLocal ? parentLocal(path) : parentRemote(path))} />
-            <Button size="small" icon={<ReloadOutlined />} title={t('sftp.refresh')} aria-label={t('sftp.refresh')}
+            <Button type="text" size="small" icon={<ReloadOutlined />} title={t('sftp.refresh')} aria-label={t('sftp.refresh')}
               onClick={() => { if (requests.matches([kind, profileId, conn?.connectionId ?? '', path])) void loadSide(side, path, 0) }} />
             {!isLocal && (
-              <>
-                <Button size="small" icon={<FolderAddOutlined />} title={t('sftp.mkdir')} aria-label={t('sftp.mkdir')}
-                  onClick={async () => {
+              <Dropdown trigger={['click']} autoFocus menu={{ items: [
+                { key: 'mkdir', label: t('sftp.mkdir'), icon: <FolderAddOutlined />, disabled: !conn,
+                  onClick: async () => {
                     const name = await simplePrompt(t('sftp.mkdir'))
                     if (name) await remoteAction(side, 'sftp.mkdir', { path: joinRemote(path, name) }, scope)
-                  }} />
-                <Button size="small" icon={<DeleteOutlined />} title={t('sftp.remove')} aria-label={t('sftp.remove')} danger
-                  disabled={!sel}
-                  onClick={async () => {
+                  } },
+                { key: 'remove', label: t('sftp.remove'), icon: <DeleteOutlined />, danger: true, disabled: !sel,
+                  onClick: async () => {
                     if (!sel || !requests.source(sourceScope)) return
                     if (sel.isDir) await remoteAction(side, 'sftp.removeRecursive', { path: sel.path }, sourceScope)
                     else await remoteAction(side, 'sftp.remove', { path: sel.path }, sourceScope)
-                  }} />
-                <Button size="small" icon={<DashboardOutlined />} title={t('sftp.du')} aria-label={t('sftp.du')}
-                  onClick={() => showDu(side, scope)} disabled={!conn} />
-              </>
+                  } },
+                { key: 'du', label: t('sftp.du'), icon: <DashboardOutlined />, disabled: !conn, onClick: () => showDu(side, scope) },
+              ] }}>
+                <Button type="text" size="small" icon={<MoreOutlined />} title={t('sftp.actions')} aria-label={t('sftp.actions')} />
+              </Dropdown>
             )}
           </Space>
+          {isLocal ? (
+            <Button className="pane-transfer" size="small" type="primary" ghost icon={<ArrowUpOutlined />}
+              aria-label={t('sftp.upload')} title={t('sftp.upload')}
+              disabled={!(side === 'left' ? rightConn : leftConn)}
+              onClick={() => uploadFromPicker(side, sourceScope)}>
+              <span className="pane-transfer-label">{t('sftp.upload')}</span>
+            </Button>
+          ) : (
+            <Button className="pane-transfer" size="small" type="primary" ghost icon={<SwapOutlined />}
+              aria-label={t('sftp.sendToPeer')} title={t('sftp.sendToPeer')}
+              disabled={!conn}
+              onClick={() => sendToPeer(side, sourceScope)}>
+              <span className="pane-transfer-label">{t('sftp.sendToPeer')}</span>
+            </Button>
+          )}
         </div>
         {editing ? (
           <Input
@@ -631,11 +618,12 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
               </span>
             )}
             <Tooltip title={t('sftp.copyPath')}>
-              <CopyOutlined className="path-edit" onClick={() => copyPath(path)} />
+              <Button type="text" size="small" className="path-edit" icon={<CopyOutlined />} aria-label={t('sftp.copyPath')} onClick={() => copyPath(path)} />
             </Tooltip>
-            <EditOutlined
+            <Button type="text" size="small" icon={<EditOutlined />}
               className="path-edit"
               title={t('sftp.editPath')}
+              aria-label={t('sftp.editPath')}
               onClick={() => {
                 // 编辑草稿不参与目录身份，只有 Enter 才提交并加载新路径。
                 setPathDraft(current => ({ ...current, [side]: path || (isLocal ? '' : '.') }))
@@ -648,9 +636,12 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
         {du && du.side === side && requests.current(du.scope) && (
           <div className="fs-du">
             <span>{du.text}</span>
-            <CloseOutlined className="fs-du-close" onClick={() => { duRequest.current[side]++; setDu(null) }} />
+            <Button type="text" size="small" icon={<CloseOutlined />} className="fs-du-close" aria-label={t('sftp.closeUsage')} onClick={() => { duRequest.current[side]++; setDu(null) }} />
           </div>
         )}
+        <div className="file-columns" aria-hidden="true">
+          <span>{t('sftp.columnName')}</span><span>{t('sftp.columnSize')}</span><span className="fs-modified">{t('sftp.columnModified')}</span>
+        </div>
         <div className="fs-scroll">
           <List
             size="small"
@@ -705,9 +696,10 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
                     openEntry(e, side, sourceScope)
                   }}
                 >
-                  <span className="fs-icon">{e.isDir ? '📁' : e.isLink ? '🔗' : '📄'}</span>
+                  <span className="fs-icon" aria-hidden>{e.isDir ? <FolderFilled className="file-icon-folder" /> : e.isLink ? <LinkOutlined className="file-icon-link" /> : <FileOutlined className="file-icon-file" />}</span>
                   <span className="fs-name" title={e.name}>{e.name}</span>
                   <span className="fs-meta">{e.isDir ? '' : fmtBytes(e.size)}</span>
+                  <span className="fs-meta fs-modified" title={fmtMtime(e.mtime)}>{fmtMtime(e.mtime)}</span>
                 </List.Item>
               </Dropdown>
             )}
@@ -730,12 +722,20 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
       </div>
 
       <div className="transfers-pane">
-        <Typography.Text strong>{t('sftp.transfers')}</Typography.Text>
-        <div className="fs-scroll transfers-list">
-          {transfers.length === 0 ? (
-            <div className="fs-empty">{t('sftp.transferIdle')}</div>
-          ) : (
-            transfers.slice(0, 12).map(tr => {
+        <div className="transfers-header">
+          <button type="button" className="transfers-toggle" aria-expanded={showTransfers} aria-controls="transfer-list" disabled={transfers.length === 0}
+            onClick={() => setTransfersExpanded(value => !value)}>
+            {showTransfers ? <DownOutlined /> : <UpOutlined />}
+            {t('sftp.transfers')}
+            {transfers.length > 0 && <span className="transfer-count">{transfers.length}</span>}
+          </button>
+          <div className="transfer-summary" role="status">
+            {activeTransfers > 0 && <span>{t('sftp.activeTransfers', { count: activeTransfers })}</span>}
+            {attentionTransfers > 0 && <span className="transfer-attention">{t('sftp.attentionTransfers', { count: attentionTransfers })}</span>}
+          </div>
+        </div>
+        {showTransfers && <div id="transfer-list" className="fs-scroll transfers-list">
+          {transfers.map(tr => {
               const pct = tr.totalBytes > 0 ? Math.round((tr.bytesDone / tr.totalBytes) * 100) : 0
               const label =
                 tr.direction === 'upload' ? t('state.upload')
@@ -747,14 +747,14 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
                     : tr.remotePath
               return (
                 <div key={tr.id} className="transfer-row">
-                  <Tag color={tr.direction === 'serverToServer' ? 'purple' : tr.direction === 'upload' ? 'blue' : 'green'}>
+                  <Tag className="transfer-direction" bordered={false}>
                     {label}
                   </Tag>
                   <span className="transfer-path" title={pathText}>{pathText}</span>
                   <span className="transfer-state">{t(`state.${tr.state}`)}</span>
                   {tr.state === 'running' && (
                     <>
-                      <Progress percent={pct} size="small" style={{ width: 160 }} />
+                      <Progress className="transfer-progress" percent={pct} size="small" />
                       <span className="transfer-rate">{fmtBytes(tr.rateBps ?? 0)}/s</span>
                     </>
                   )}
@@ -762,23 +762,22 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
                     <Tooltip title={tr.error}><span className="transfer-err">!</span></Tooltip>
                   )}
                   {(tr.state === 'running' || tr.state === 'queued') && (
-                    <a onClick={() => invokeAs('transfer.cancel', { taskId: tr.id }).catch(() => {})}>
+                    <Button type="text" size="small" onClick={() => invokeAs('transfer.cancel', { taskId: tr.id }).catch(() => {})}>
                       {t('sftp.cancelTransfer')}
-                    </a>
+                    </Button>
                   )}
                   {tr.state === 'interrupted' && (
                     <Tooltip title={t('sftp.interruptedHint')}><span className="transfer-err">!</span></Tooltip>
                   )}
                   {(tr.state === 'failed' || tr.state === 'cancelled' || tr.state === 'interrupted') && (
-                    <a onClick={() => invokeAs('transfer.retry', { taskId: tr.id, connectionId: tr.connectionId }).catch(e => message.error(describeError(e)))}>
+                    <Button type="text" size="small" onClick={() => invokeAs('transfer.retry', { taskId: tr.id, connectionId: tr.connectionId }).catch(e => message.error(describeError(e)))}>
                       {t('sftp.retry')}
-                    </a>
+                    </Button>
                   )}
                 </div>
               )
-            })
-          )}
-        </div>
+            })}
+        </div>}
       </div>
 
       <FilePreviewModal

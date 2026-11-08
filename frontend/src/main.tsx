@@ -102,17 +102,34 @@ function antdColor(value: string): string | undefined {
   return alpha === 255 ? 'rgb(' + [r, g, b].join(', ') + ')' : 'rgba(' + [r, g, b, alpha / 255].join(', ') + ')'
 }
 
+function primaryTextColor(accent: string | undefined, surface: string | undefined): string | undefined {
+  const context = document.createElement('canvas').getContext('2d')
+  if (!context || !accent) return undefined
+  context.fillStyle = surface ?? '#ffffff'
+  context.fillRect(0, 0, 1, 1)
+  context.fillStyle = accent
+  context.fillRect(0, 0, 1, 1)
+  const [r, g, b] = context.getImageData(0, 0, 1, 1).data
+  const channels = [r, g, b].map(value => { const s = value / 255; return s <= .04045 ? s / 12.92 : ((s + .055) / 1.055) ** 2.4 })
+  const luminance = channels[0] * .2126 + channels[1] * .7152 + channels[2] * .0722
+  return luminance > .179 ? '#000000' : '#ffffff'
+}
+
 function HostApp() {
   const [prefs, setPrefs] = React.useState(() => { applyHostPrefs(hostPrefs); return hostPrefs })
   React.useEffect(() => subscribeHostPrefs(next => { applyHostPrefs(next); setPrefs(next) }), [])
+  // GoNavi owns the palette; absent values fall back to the matching AntD mode.
   const palette = Object.fromEntries(Object.entries(prefs.palette ?? {}).map(([key, value]) => [key, antdColor(value)]))
   const token = {
     colorPrimary: palette?.accent, colorInfo: palette?.accent, colorLink: palette?.accent, colorBgLayout: palette?.bg,
     colorBgContainer: palette?.panel, colorBgElevated: palette?.panel, colorText: palette?.text,
-    colorTextSecondary: palette?.muted, colorBorder: palette?.border, colorBorderSecondary: palette?.border1,
+    colorTextSecondary: palette?.muted, colorTextPlaceholder: palette?.muted, colorBorder: palette?.border, colorBorderSecondary: palette?.border1,
     colorPrimaryBg: palette?.accentSoft, colorFillAlter: palette?.chip, controlItemBgHover: palette?.hover,
     colorSuccess: palette?.ok, colorWarning: palette?.warn, colorWarningBg: palette?.warnBg,
-    fontFamily: prefs.appearance?.fontFamily, fontSize: prefs.appearance?.fontSize, borderRadius: prefs.appearance?.radius,
+    fontFamily: prefs.appearance?.fontFamily ?? '-apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif',
+    fontSize: prefs.appearance?.fontSize ?? 13, borderRadius: prefs.appearance?.radius ?? 8,
+    controlHeight: 32, controlHeightSM: 26,
+    boxShadowSecondary: prefs.theme === 'dark' ? '0 8px 28px rgba(0,0,0,.32)' : '0 8px 28px rgba(24,35,55,.12)',
   }
   const overrides = Object.fromEntries(Object.entries(token).filter(([, value]) => value !== undefined))
   const algorithm = prefs.theme === 'dark' ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm
@@ -120,7 +137,14 @@ function HostApp() {
     locale={antdLocales[antdLocaleKey()]}
     theme={{ algorithm: seed => ({ ...algorithm(seed), ...overrides }),
       token: overrides,
-      components: { Input: { colorBgContainer: palette?.input }, InputNumber: { colorBgContainer: palette?.input }, Select: { colorBgContainer: palette?.input } },
+      components: {
+        Input: { colorBgContainer: palette.input },
+        InputNumber: { colorBgContainer: palette.input },
+        Select: { colorBgContainer: palette.input },
+        Button: { defaultShadow: 'none', primaryShadow: 'none', dangerShadow: 'none', primaryColor: primaryTextColor(palette.accent, palette.panel) },
+        Tabs: { itemColor: palette.muted, itemSelectedColor: palette.text, itemHoverColor: palette.text },
+        Segmented: { trackBg: palette.chip, itemSelectedBg: palette.input, itemColor: palette.muted, itemSelectedColor: palette.text },
+      },
     }}
   ><App /></ConfigProvider>
 }

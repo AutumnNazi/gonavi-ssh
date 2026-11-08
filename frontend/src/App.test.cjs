@@ -10,7 +10,7 @@ const ts = require('typescript')
 // 不是断言源码里出现过哪段字符串。
 // 挑战续跑（TDD 复现用）：APP_SOURCE_FILE 可指向另一份 App.tsx，
 // 用来证明新增的挑战用例在修复前是红的。
-function fixture(invoke = async () => ({ tasks: [] })) {
+function fixture(invoke = async () => ({ tasks: [] }), savedWidth) {
   const hooks = [], effects = [], scheduled = [], calls = [], tCalls = [], messages = [], modals = [], closed = []
   let cursor = 0, tree, changed = false
   const react = {
@@ -44,7 +44,8 @@ function fixture(invoke = async () => ({ tasks: [] })) {
   }).outputText
   const module = { exports: {} }
   // 宿主注入的窗口桥：关窗动作只通过它发生。
-  const window = { gonaviPlugin: { close: () => { closed.push(true); return Promise.resolve() } } }
+  const storage = new Map(savedWidth === undefined ? [] : [['gonavi.ssh.sidebarWidth', savedWidth]])
+  const window = { localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) }, gonaviPlugin: { close: () => { closed.push(true); return Promise.resolve() } } }
   const context = {
     module, exports: module.exports, console, window, setTimeout, clearTimeout,
     require(name) {
@@ -69,6 +70,12 @@ function fixture(invoke = async () => ({ tasks: [] })) {
         }
       }
       if (name === './i18n') return { t: (key, params) => { tCalls.push({ key, params }); return key } }
+      if (name === './usePanelResize') {
+        const resizeModule = { exports: {} }
+        const source = ts.transpileModule(fs.readFileSync(path.join(__dirname, 'usePanelResize.ts'), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2021, module: ts.ModuleKind.CommonJS } }).outputText
+        vm.runInNewContext(source, { module: resizeModule, exports: resizeModule.exports, require: () => react })
+        return resizeModule.exports
+      }
       // base64 只是过桥的壳、shell 引号另有单测：这里断言的是"往终端写了什么命令"。
       if (name === './b64') return { encodeText: text => text, decodeText: text => text }
       if (name === './fsFormat') return { quoteShellArg: path => `'${path}'` }
@@ -109,12 +116,12 @@ function fixture(invoke = async () => ({ tasks: [] })) {
   }
   render()
   return {
-    calls, tCalls, messages, modals, closed, render, settle, find,
+    calls, tCalls, messages, modals, closed, render, settle, find, storage,
     // 关窗入口挂在主 Tabs 的 tabBarExtraContent 上，不在 children 里，得从 Tabs 取。
     closeEntry() {
       const tabs = find(node => node.props?.className === 'main-tabs')
       assert.ok(tabs, '主 Tabs 必须渲染')
-      const extra = tabs.props.tabBarExtraContent
+      const extra = tabs.props.tabBarExtraContent.right
       assert.equal(extra?.type, 'Button', '关窗入口必须挂在顶栏')
       return extra
     },
@@ -176,6 +183,27 @@ async function withTree(settings = {}) {
 const treeNode = view => view.find(node => node.type === 'FileTreePanel', view.tabContent('terminals'))
 const terminalNode = view => view.find(node => node.type === 'TerminalView', view.terminalView())
 const saved = view => view.calls.filter(call => call.command === 'settings.set').at(-1)?.args?.settings
+
+test('opening an already connected profile returns to its terminal without creating another session', async () => {
+  let connected = false
+  const conn = { connectionId: 'c1', profileId: 'p1', state: 'ready', alive: true }
+  const view = fixture(async command => {
+    if (command === 'conn.open') { connected = true; return conn }
+    if (command === 'conn.status') return { connections: connected ? [conn] : [] }
+    if (command === 'terminal.open') return { sessionKey: 'k1' }
+    return {}
+  })
+  try {
+    await view.settle()
+    await view.connect(PROFILE); await view.settle()
+    view.find(node => node.props?.className === 'main-tabs').props.onChange('files'); view.render()
+    await view.connect(PROFILE); await view.settle()
+    assert.equal(view.find(node => node.props?.className === 'main-tabs').props.activeKey, 'terminals')
+    assert.equal(view.calls.filter(call => call.command === 'terminal.open').length, 1)
+    assert.equal(view.calls.filter(call => call.command === 'conn.open').length, 1)
+    assert.equal(view.find(node => node.type === 'ProfilePanel').props.activeProfileId, 'p1')
+  } finally { view.unmount() }
+})
 
 test('following is only passed to the terminal while the file browser is on screen', async () => {
   // 跟随开关长在文件浏览面板上：面板没显示就没有可跟随的东西，此时还让终端
@@ -240,6 +268,10 @@ test('the download folder picked in the panel is written back through settings',
 test('turning the tree back on in settings shows it again after a collapse', async () => {
   const view = await withTree({ showFileTree: true })
   try {
+    treeNode(view).props.onWidthChange(380)
+    view.render()
+    assert.equal(treeNode(view).props.width, 380)
+    assert.equal(saved(view), undefined, 'resizing is local layout state, not a settings write')
     treeNode(view).props.onCollapse()
     await view.settle()
     assert.equal(treeNode(view), undefined, '收起后先是不显示')
@@ -247,6 +279,7 @@ test('turning the tree back on in settings shows it again after a collapse', asy
     view.find(node => node.type === 'SettingsPanel', view.tabContent('settings')).props.onSaved()
     await view.settle()
     assert.ok(treeNode(view), '设置里重新打开要能再显示，收起不能变成永久隐藏')
+    assert.equal(treeNode(view).props.width, 380, 'reopening in the same window retains the resized width')
   } finally { view.unmount() }
 })
 
@@ -497,4 +530,37 @@ test('a jump command moves the tree when following, and is ignored when it is of
     await off.settle()
     assert.equal(treeNode(off).props.jump, null, '没开跟随时面板留在原地')
   } finally { off.unmount() }
+})
+
+
+test('connection sidebar restores width, saves completed resizing and retains it across collapse', () => {
+  const view = fixture(undefined, '320')
+  try {
+    const sidebar = () => view.find(n => n.props?.id === 'connection-sidebar')
+    const toggle = () => view.find(n => n.props?.className === 'main-tabs').props.tabBarExtraContent.left
+    assert.equal(sidebar().props.style.width, 320)
+    const pane = { parentElement: { clientWidth: 1200 }, style: { width: '320px' }, getBoundingClientRect() { return { width: parseFloat(this.style.width) } } }
+    const handle = { parentElement: pane, setAttribute() {} }
+    view.find(n => n.props?.['aria-label'] === 'conn.resize').props.onKeyDown({ key: 'ArrowRight', currentTarget: handle, preventDefault() {} })
+    view.render()
+    assert.equal(sidebar().props.style.width, 336)
+    assert.equal(view.storage.get('gonavi.ssh.sidebarWidth'), '336')
+    toggle().props.onClick(); view.render()
+    assert.equal(sidebar().props.hidden, true)
+    assert.equal(toggle().props['aria-expanded'], false)
+    toggle().props.onClick(); view.render()
+    assert.equal(sidebar().props.hidden, false)
+    assert.equal(sidebar().props.style.width, 336)
+    assert.equal(view.calls.some(c => c.command === 'settings.set'), false)
+    view.find(n => n.props?.className === 'main-tabs').props.onChange('files')
+    view.render()
+    view.find(n => n.props?.['aria-label'] === 'conn.resize').props.onKeyDown({ key: 'End', currentTarget: handle, preventDefault() {} })
+    view.render()
+    assert.equal(sidebar().props.style.width, 600, 'dual file panes reserve enough room for both toolbars')
+  } finally { view.unmount() }
+  for (const saved of [undefined, '', 'NaN', '-5', '150', 'Infinity']) {
+    const fallback = fixture(undefined, saved)
+    assert.equal(fallback.find(n => n.props?.id === 'connection-sidebar').props.style.width, 240)
+    fallback.unmount()
+  }
 })

@@ -31,6 +31,7 @@ const PREVIEW_MAX_BYTES = 262144
 export function FilePreviewModal<T extends PreviewTarget>({ target, onClose, onSaved }: Props<T>) {
   const [draft, setDraft] = useState('')
   const [truncated, setTruncated] = useState(false)
+  const [loaded, setLoaded] = useState(false)
   const [saving, setSaving] = useState(false)
   // 打开别的文件、或保存后关窗时，在途的响应不能落到新内容上。
   const seq = useRef(0)
@@ -41,10 +42,12 @@ export function FilePreviewModal<T extends PreviewTarget>({ target, onClose, onS
   useEffect(() => { close.current = onClose; saved.current = onSaved }, [onClose, onSaved])
 
   useEffect(() => {
-    if (!target) return
     const token = ++seq.current
+    setSaving(false)
+    setLoaded(false)
     setDraft('')
     setTruncated(false)
+    if (!target) return
     void (async () => {
       try {
         const res = await invokeAs<{ dataBase64: string; truncated?: boolean }>('sftp.preview', {
@@ -63,16 +66,18 @@ export function FilePreviewModal<T extends PreviewTarget>({ target, onClose, onS
         }
         setDraft(text)
         setTruncated(!!res.truncated)
+        setLoaded(true)
       } catch (e) {
         if (token !== seq.current) return
         message.error(describeError(e))
         close.current()
       }
     })()
+    return () => { seq.current++ }
   }, [target])
 
   const save = async () => {
-    if (!target || truncated || saving) return
+    if (!target || !loaded || truncated || saving) return
     const token = seq.current
     setSaving(true)
     try {
@@ -82,6 +87,7 @@ export function FilePreviewModal<T extends PreviewTarget>({ target, onClose, onS
         dataBase64: encodeText(draft),
       })
       if (token !== seq.current) return
+      setSaving(false)
       // 递增让在途的拉取作废：保存完就关窗，迟到的预览结果不该再翻开。
       seq.current++
       message.success(t('sftp.saveFile'))
@@ -101,7 +107,7 @@ export function FilePreviewModal<T extends PreviewTarget>({ target, onClose, onS
       onCancel={() => close.current()}
       onOk={() => void save()}
       okText={t('sftp.saveFile')}
-      okButtonProps={{ disabled: truncated, loading: saving }}
+      okButtonProps={{ disabled: truncated || !loaded, loading: saving }}
       width={760}
       destroyOnHidden
     >
@@ -113,7 +119,7 @@ export function FilePreviewModal<T extends PreviewTarget>({ target, onClose, onS
         value={draft}
         onChange={e => setDraft(e.target.value)}
         style={{ fontFamily: 'Consolas, monospace' }}
-        readOnly={truncated}
+        readOnly={truncated || !loaded}
       />
     </Modal>
   )

@@ -76,6 +76,7 @@ function fixture(reply = async () => ({ entries: [], home: '/root' }), overrides
       }
       if (name === '../fsFormat') return load(path.join(__dirname, '..', 'fsFormat.ts'))
       if (name === '../i18n') return { t: key => key }
+      if (name === '../usePanelResize') return load(path.join(__dirname, '..', 'usePanelResize.ts'), { require: () => react })
       if (name === './PathBreadcrumb') return load(path.join(__dirname, 'PathBreadcrumb.tsx'), {
         require: n => (n === 'react/jsx-runtime' ? { jsx, jsxs: jsx, Fragment: 'Fragment' } : {}),
       })
@@ -140,7 +141,10 @@ function fixture(reply = async () => ({ entries: [], home: '/root' }), overrides
     return found
   }
   const button = label => {
-    const node = find(n => n.type === 'Button' && n.props['aria-label'] === label)
+    const direct = find(n => n.type === 'Button' && n.props['aria-label'] === label)
+    const menu = find(n => n.type === 'Dropdown' && n.props.trigger?.includes('click'))?.props.menu
+    const item = menu?.items.find(item => item.label === label)
+    const node = direct ?? (item && { props: { onClick: item.onClick, disabled: item.disabled } })
     assert.ok(node, `button ${label} must exist`)
     return node
   }
@@ -186,7 +190,7 @@ test('the tree lists the current directory with directories first', async () => 
     "目录在前、其余按名称排；还在 home（'.'）时没有上一级，不显示「..」",
   )
   assert.equal(view.cell('/root/a.txt', 'fs-meta').props.children, '12 B', '文件显示大小')
-  assert.equal(view.cell('/root/a.txt', 'fs-time').props.children, '2026-11-06 14:57', '最后修改时间按本地格式显示')
+  assert.equal(view.rows().find(row => row.props['data-path'] === '/root/a.txt').props.title, 'a.txt\n12 B\n2026-11-06 14:57', '时间放进悬停详情，为文件名保留宽度')
 })
 
 test('directories show no size and carry their own path', async () => {
@@ -318,6 +322,69 @@ test('a listing failure is reported without wiping the current view', async () =
   view.render()
   assert.deepEqual(view.messages.map(message => message.text), ['listing refused'])
   assert.ok(view.rows().some(row => row.props['data-path'] === '/root/kept.txt'), '失败不该清空已有列表')
+})
+
+test('a listing rejected after disconnect does not report an obsolete error', async () => {
+  let rejectList
+  const view = fixture(() => new Promise((_, reject) => { rejectList = reject }))
+  view.props.connectionId = null
+  view.render()
+  rejectList(new Error('old connection closed'))
+  await settle()
+  assert.deepEqual(view.messages, [])
+})
+
+test('completing a remote action after a connection switch cannot reload the old connection', async () => {
+  let finishAction
+  const view = fixture(async (command, args) => command === 'sftp.mkdir'
+    ? new Promise(resolve => { finishAction = resolve })
+    : { entries: [entry(args.connectionId + '.txt')] })
+  await settle()
+  view.render()
+  view.click('sftp.mkdir')
+  view.modal().content.props.onChange({ target: { value: 'logs' } })
+  view.modal().onOk()
+  await settle()
+  view.props.connectionId = 'c2'
+  view.render()
+  await settle()
+  finishAction({})
+  await settle()
+  view.render()
+  assert.equal(view.calls.filter(call => call.command === 'sftp.list').length, 2)
+  assert.deepEqual(view.rows().map(row => row.props['data-path']), ['/root/c2.txt'])
+})
+
+test('confirming an obsolete file action after switching connections cannot mutate the old server', async () => {
+  const view = await listed([entry('a.txt')])
+  view.click('sftp.mkdir')
+  const mkdir = view.modal()
+  mkdir.content.props.onChange({ target: { value: 'logs' } })
+  view.select('/root/a.txt')
+  view.render()
+  view.click('sftp.remove')
+  const remove = view.modal()
+  view.props.connectionId = 'c2'
+  view.render()
+  await settle()
+  mkdir.onOk()
+  await remove.onOk()
+  await settle()
+  assert.equal(view.calls.some(call => ['sftp.mkdir', 'sftp.remove'].includes(call.command)), false)
+})
+
+test('following terminal directories still allows file preview and switching connections closes it', async () => {
+  const view = await listed([entry('a.txt'), entry('dir', { isDir: true })], { follow: true })
+  view.open('/root/dir')
+  assert.deepEqual(view.paths(), ['.'])
+  view.open('/root/a.txt')
+  view.render()
+  assert.equal(view.find(node => node.props?.target?.path === '/root/a.txt')?.props.target.connectionId, 'c1')
+  view.props.connectionId = 'c2'
+  view.render()
+  await settle()
+  view.render()
+  assert.equal(view.find(node => node.props?.target?.path === '/root/a.txt'), undefined)
 })
 
 test('without a terminal connection the tree asks to connect instead of listing', async () => {
@@ -523,12 +590,16 @@ test('dropping something that was never dragged in is ignored', async () => {
   assert.equal(view.calls.some(call => call.command === 'transfer.start'), false, '没有拖拽来源就不猜下载哪个')
 })
 
-// 行右键菜单：Dropdown 包在行外面，用行自身的 data-path 认领它
-// （React 的 key 是 jsx 的独立参数，不在 props 上，认不出来）。
+// 模拟捕获阶段清除旧目标，再冒泡到行上选取当前右键目标。
+const contextMenu = (view, path) => {
+  view.find(node => node.props?.className === 'fs-scroll').props.onContextMenuCapture()
+  if (path) view.row(path).props.onContextMenu()
+  view.render()
+  return view.find(node => node.type === 'Dropdown' && node.props.trigger?.includes('contextMenu'))
+}
 const menuKeys = (view, path) => {
-  const dropdown = view.find(node =>
-    node.type === 'Dropdown' && node.props.children?.props?.['data-path'] === path)
-  assert.ok(dropdown, `row ${path} must carry a context menu`)
+  const dropdown = contextMenu(view, path)
+  assert.equal(dropdown.props.open, true)
   return dropdown.props.menu.items.map(item => item.key)
 }
 
@@ -548,4 +619,136 @@ test('a file row menu offers open and download, a directory row menu offers cd',
   for (const key of ['rename', 'remove', 'copyPath', 'mkdir', 'upload']) {
     assert.ok(dir.includes(key), `${key} 对目录也要有`)
   }
+})
+
+test('500 directory entries share one context menu and actions target the right-clicked row', async () => {
+  const entries = Array.from({ length: 500 }, (_, i) => entry(`file${i}.txt`))
+  const view = await listed(entries)
+  let menus = 0
+  view.find(node => { if (node.type === 'Dropdown' && node.props.trigger?.includes('contextMenu')) menus++; return false })
+  assert.equal(view.rows().length, 500)
+  assert.equal(menus, 1, 'large directories must not mount a Dropdown trigger per row')
+  view.select('/root/file0.txt')
+  view.render()
+  contextMenu(view, '/root/file499.txt').props.menu.onClick({ key: 'download' })
+  await settle()
+  assert.equal(view.calls.find(call => call.command === 'transfer.start').args.remotePath, '/root/file499.txt')
+  view.render()
+  assert.equal(view.find(node => node.type === 'Dropdown' && node.props.trigger?.includes('contextMenu')).props.open, false)
+  const next = contextMenu(view, '/root/file498.txt')
+  next.props.menu.onClick({ key: 'rename' })
+  view.modal().content.props.onChange({ target: { value: 'renamed.txt' } })
+  view.modal().onOk()
+  await settle()
+  assert.deepEqual(view.calls.find(call => call.command === 'sftp.rename').args, {
+    connectionId: 'c1', oldPath: '/root/file498.txt', newPath: '/root/renamed.txt',
+  })
+})
+
+test('blank context clicks and directory or connection changes clear the menu target', async () => {
+  const view = await listed([entry('a.txt'), entry('dir', { isDir: true })])
+  contextMenu(view, '/root/a.txt')
+  const blank = contextMenu(view)
+  blank.props.onOpenChange(true)
+  view.render()
+  assert.equal(view.find(node => node.type === 'Dropdown' && node.props.trigger?.includes('contextMenu')).props.open, false)
+  view.find(node => node.type === 'Dropdown' && node.props.trigger?.includes('contextMenu')).props.menu.onClick({ key: 'remove' })
+  assert.equal(view.modal(), undefined, 'blank space must never reuse a previous row')
+
+  contextMenu(view, '/root/a.txt')
+  view.open('/root/dir')
+  view.render()
+  assert.equal(view.find(node => node.type === 'Dropdown' && node.props.trigger?.includes('contextMenu')).props.open, false, 'close while navigation is pending')
+  await settle()
+  view.render()
+  contextMenu(view, '/root/a.txt')
+  view.props.connectionId = 'c2'
+  view.render()
+  await settle()
+  view.render()
+  assert.equal(view.find(node => node.type === 'Dropdown' && node.props.trigger?.includes('contextMenu')).props.open, false)
+})
+
+test('selecting a row and a pending listing completing both dismiss old context actions', async () => {
+  let finish
+  const view = fixture(async (_command, args) => args.path === '.'
+    ? { entries: [entry('old.txt'), entry('dir', { isDir: true })] }
+    : new Promise(resolve => { finish = resolve }))
+  await settle()
+  view.render()
+  contextMenu(view, '/root/old.txt')
+  view.select('/root/dir')
+  view.render()
+  assert.equal(view.find(node => node.type === 'Dropdown' && node.props.trigger?.includes('contextMenu')).props.open, false, 'left click dismisses the menu')
+  view.open('/root/dir')
+  contextMenu(view, '/root/old.txt')
+  finish({ entries: [entry('new.txt')] })
+  await settle()
+  view.render()
+  assert.equal(view.find(node => node.type === 'Dropdown' && node.props.trigger?.includes('contextMenu')).props.open, false, 'a response must dismiss menus opened during its request')
+})
+
+
+test('file pane resize clamps width, commits once, cancels cleanly and supports keyboard reset', () => {
+  const saved = []
+  const view = fixture(async () => ({ entries: [] }), { width: 260, onWidthChange: value => saved.push(value) })
+  const separator = view.find(node => node.props?.role === 'separator').props
+  const attributes = new Map(), captures = new Set()
+  const container = { clientWidth: 900 }
+  const pane = {
+    parentElement: container, style: { width: '260px' },
+    getBoundingClientRect() { return { width: Math.min(Number.parseFloat(this.style.width), Math.max(160, container.clientWidth - 200)) } },
+    setAttribute: (key, value) => attributes.set(key, value), removeAttribute: key => attributes.delete(key),
+  }
+  const handle = {
+    parentElement: pane, focus() {}, setAttribute: (key, value) => attributes.set(key, value),
+    setPointerCapture: id => captures.add(id), hasPointerCapture: id => captures.has(id), releasePointerCapture: id => captures.delete(id),
+  }
+  const event = (clientX, extra = {}) => ({ currentTarget: handle, pointerId: 1, clientX, button: 0, isPrimary: true, preventDefault() {}, ...extra })
+  separator.onPointerDown(event(100, { button: 2 }))
+  separator.onPointerMove(event(300))
+  assert.equal(pane.style.width, '260px', 'secondary buttons cannot resize')
+  separator.onPointerDown(event(100))
+  separator.onPointerMove(event(200))
+  assert.equal(pane.style.width, '360px')
+  separator.onPointerMove(event(900))
+  assert.equal(pane.style.width, '700px')
+  assert.deepEqual(saved, [], 'moving must not re-render the file list or persist every pointer event')
+  separator.onPointerUp(event(900))
+  assert.deepEqual(saved, [700])
+  assert.equal(captures.size, 0)
+  assert.equal(attributes.has('data-resizing'), false)
+  container.clientWidth = 700
+  separator.onKeyDown(event(0, { key: 'End' }))
+  assert.equal(pane.style.width, '500px', 'leave 200px for the terminal')
+  separator.onPointerDown(event(100))
+  separator.onPointerMove(event(-900))
+  assert.equal(pane.style.width, '160px')
+  separator.onPointerCancel(event(-900))
+  assert.equal(pane.style.width, '500px')
+  assert.deepEqual(saved, [700, 500], 'cancel restores the starting size without committing')
+  separator.onKeyDown(event(0, { key: 'Home' }))
+  separator.onKeyDown(event(0, { key: 'ArrowRight' }))
+  assert.equal(pane.style.width, '176px')
+  separator.onDoubleClick(event(0))
+  assert.equal(pane.style.width, '260px')
+  separator.onPointerDown(event(100))
+  separator.onPointerMove(event(200))
+  separator.onKeyDown(event(0, { key: 'Escape' }))
+  assert.equal(pane.style.width, '260px')
+  separator.onLostPointerCapture(event(0))
+  assert.deepEqual(saved, [700, 500, 160, 176, 260])
+  assert.equal(attributes.get('aria-valuenow'), '260')
+  container.clientWidth = 1600
+  separator.onKeyDown(event(0, { key: 'End' }))
+  assert.equal(pane.style.width, '1400px', 'wide windows must not have a fixed sidebar cap')
+  assert.equal(attributes.get('aria-valuemax'), '1400')
+  container.clientWidth = 500
+  separator.onPointerDown(event(100))
+  separator.onPointerMove(event(50))
+  separator.onKeyDown(event(0, { key: 'Escape' }))
+  assert.equal(pane.style.width, '1400px', 'cancel must preserve the preferred width before CSS viewport clamping')
+  assert.equal(attributes.get('aria-valuenow'), '300', 'accessibility reports the rendered width')
+  container.clientWidth = 1600
+  assert.equal(pane.getBoundingClientRect().width, 1400, 'the pane regains its preferred width when the window grows')
 })

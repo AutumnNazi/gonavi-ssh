@@ -90,6 +90,25 @@ const changeValues = (view, all) => {
 
 const BASE = { readOnly: false, sudoAllowlist: [], quickCommands: [], historyLimit: 500 }
 
+test('switching settings sections preserves pending edits and does not write navigation state', async () => {
+  const view = fixture()
+  try {
+    view.props.settings = { ...BASE }
+    view.render()
+    changeValues(view, { sudoAllowlist: 'uptime', quickCommands: [{ name: 'Disk', command: 'df -h' }] })
+    view.find(node => node.props?.['aria-controls'] === 'settings-commands').props.onClick()
+    view.render()
+    assert.equal(view.find(node => node.props?.id === 'settings-commands').props.hidden, false)
+    assert.equal(view.find(node => node.props?.id === 'settings-terminal').props.hidden, true)
+    view.find(node => node.props?.['aria-controls'] === 'settings-security').props.onClick()
+    view.render()
+    await waitSave()
+    assert.equal(writes(view).length, 1)
+    assert.deepEqual([...lastWrite(view).sudoAllowlist], ['uptime'])
+    assert.equal(lastWrite(view).quickCommands[0].command, 'df -h')
+  } finally { view.unmount() }
+})
+
 test('the settings page has no save button any more', async () => {
   const view = fixture()
   view.props.settings = { ...BASE }
@@ -123,14 +142,15 @@ test('every field lands in settings as soon as it changes', async () => {
   assert.equal(view.calls.some(call => call.command === 'onSaved'), true, '落盘后要通知上层刷新')
 })
 
-test('the directory follow switch is carried back untouched', async () => {
+test('file panel preferences are carried back untouched', async () => {
   // 跟随的开关长在文件面板底部：设置页全量写入时不能凭空造一个 false 把它关掉。
   const view = fixture()
-  view.props.settings = { ...BASE, cwdFollow: true }
+  view.props.settings = { ...BASE, cwdFollow: true, downloadDir: 'C:/Downloads' }
   view.render()
   changeValues(view, { readOnly: false, quickCommands: [] })
   await waitSave()
   assert.equal(lastWrite(view).cwdFollow, true)
+  assert.equal(lastWrite(view).downloadDir, 'C:/Downloads')
 })
 
 test('a burst of edits is written once, not once per keystroke', async () => {

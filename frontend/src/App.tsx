@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { App as AntApp, Button, Layout, message, Modal, Tabs, Input } from 'antd'
+import { CloseOutlined, CodeOutlined, FolderOpenOutlined, SettingOutlined, MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons'
 import {
   ProfilePanel,
   type ProfileView,
@@ -12,6 +13,7 @@ import { invokeAs, describeError } from './bridge'
 import { encodeText } from './b64'
 import { quoteShellArg } from './fsFormat'
 import { t } from './i18n'
+import { usePanelResize } from './usePanelResize'
 import type {
   Challenge,
   ConnectionInfo,
@@ -20,7 +22,7 @@ import type {
   TransferStatus,
 } from './types'
 
-const { Sider, Content } = Layout
+const { Content } = Layout
 
 let tabSeq = 0
 
@@ -44,6 +46,20 @@ export default function App() {
   // 跳转要能在设置关着的时候也让用户看见目标目录，但不该改掉持久化设置；
   // 收起则要立刻生效——设置读不到（settings 还是 null）时也不能点了没反应。
   const [treeOverride, setTreeOverride] = useState<boolean | null>(null)
+  const [fileTreeWidth, setFileTreeWidth] = useState(260)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    try {
+      const saved = Number(window.localStorage.getItem('gonavi.ssh.sidebarWidth'))
+      if (Number.isFinite(saved) && saved >= 200 && saved <= 10000) return saved
+    } catch { /* 宿主未开放本地存储时使用默认布局。 */ }
+    return 240
+  })
+  const sidebarReserve = mainTab === 'files' ? 600 : 400
+  const sidebarResize = usePanelResize(sidebarWidth, 200, sidebarReserve, 240, value => {
+    setSidebarWidth(value)
+    try { window.localStorage.setItem('gonavi.ssh.sidebarWidth', String(value)) } catch { /* 当前窗口仍保留宽度。 */ }
+  })
   const connecting = useRef<Set<string>>(new Set())
 
   const challenge = challengeQueue[0] ?? null
@@ -370,34 +386,44 @@ export default function App() {
 
   return (
     <AntApp style={{ height: '100%' }}>
-      <Layout className="app-root">
-        <Sider width={300} theme="light" className="app-sider">
-          <ProfilePanel
+      <Layout hasSider className="app-root">
+        <aside id="connection-sidebar" className="app-sider" style={{ width: sidebarWidth, maxWidth: `max(200px, calc(100% - ${sidebarReserve}px))` }} hidden={sidebarCollapsed} aria-label={t('conn.title')}>
+          <div className="sidebar-scroll"><ProfilePanel
             profiles={profiles}
             connections={connections}
+            activeProfileId={activeTab?.profileId}
             onChanged={refreshProfiles}
-            onConnect={openConnection}
+            onConnect={profile => {
+              const existing = tabs.find(tab => tab.profileId === profile.id && connections.some(conn => conn.connectionId === tab.connectionId && conn.state === 'ready' && conn.alive))
+              if (existing) { setActiveKey(existing.tabKey); setMainTab('terminals'); return }
+              return openConnection(profile)
+            }}
             onConnectionsChanged={refreshConnections}
-          />
-        </Sider>
+          /></div>
+          <div {...sidebarResize} className="panel-resizer" aria-label={t('conn.resize')} title={t('tree.resizeHint')} />
+        </aside>
         <Content className="app-content">
           <Tabs
             className="main-tabs"
             activeKey={mainTab}
             onChange={setMainTab}
-            tabBarExtraContent={
-              <Button size="small" onClick={() => void requestClose()}>
-                {t('app.closeWindow')}
-              </Button>
-            }
+            tabBarExtraContent={{
+              left: <Button className="sidebar-toggle" size="small" type="text" icon={sidebarCollapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+                title={t(sidebarCollapsed ? 'conn.showSidebar' : 'conn.hideSidebar')} aria-label={t(sidebarCollapsed ? 'conn.showSidebar' : 'conn.hideSidebar')}
+                aria-expanded={!sidebarCollapsed} aria-controls="connection-sidebar" onClick={() => setSidebarCollapsed(value => !value)} />,
+              right: <Button size="small" type="text" icon={<CloseOutlined />} title={t('app.closeWindow')} aria-label={t('app.closeWindow')} onClick={() => void requestClose()} />,
+            }}
             items={[
               {
                 key: 'terminals',
+                icon: <CodeOutlined aria-hidden />,
                 label: t('tab.terminals'),
                 children: (
                   <div className="terminals-wrap">
-                    {showFileTree && (
+                    {showFileTree && activeTab && (
                       <FileTreePanel
+                        width={fileTreeWidth}
+                        onWidthChange={setFileTreeWidth}
                         connectionId={activeTab?.connectionId ?? null}
                         jump={treeJump}
                         follow={followTree}
@@ -410,9 +436,10 @@ export default function App() {
                     )}
                     <div className="terminals-main">
                       {tabs.length === 0 ? (
-                        <div className="empty-hint">{t('conn.empty')}</div>
+                        <div className="empty-hint"><CodeOutlined aria-hidden /><span>{t('sftp.selectConn')}</span></div>
                       ) : (
                         <Tabs
+                          className="session-tabs"
                           hideAdd
                           type="editable-card"
                           activeKey={activeKey}
@@ -448,6 +475,7 @@ export default function App() {
               },
               {
                 key: 'files',
+                icon: <FolderOpenOutlined aria-hidden />,
                 label: t('tab.files'),
                 children: (
                   <SftpPanel
@@ -461,6 +489,7 @@ export default function App() {
               },
               {
                 key: 'settings',
+                icon: <SettingOutlined aria-hidden />,
                 label: t('tab.settings'),
                 children: (
                   <SettingsPanel

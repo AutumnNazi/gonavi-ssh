@@ -4,19 +4,18 @@ import {
   Badge,
   Button,
   Checkbox,
+  Dropdown,
   Empty,
   Form,
   Input,
   InputNumber,
   Modal,
-  Popconfirm,
   Select,
   Space,
-  Tag,
   Typography,
   message,
 } from 'antd'
-import { PlusOutlined, DownloadOutlined, ReloadOutlined } from '@ant-design/icons'
+import { PlusOutlined, DownloadOutlined, ReloadOutlined, MoreOutlined, EditOutlined, DeleteOutlined, DisconnectOutlined, SearchOutlined, CheckSquareOutlined, CloseOutlined, HddOutlined } from '@ant-design/icons'
 import { invokeAs, describeError } from '../bridge'
 import { t } from '../i18n'
 import type { AuthMethod, ConnectionInfo, ProfileView } from '../types'
@@ -50,6 +49,7 @@ interface ProfileFormValues {
 interface Props {
   profiles: ProfileView[]
   connections: ConnectionInfo[]
+  activeProfileId?: string
   onChanged: () => void
   onConnect: (p: ProfileView) => void
   onConnectionsChanged: () => void
@@ -65,6 +65,7 @@ const authOptions = [
 export function ProfilePanel({
   profiles,
   connections,
+  activeProfileId,
   onChanged,
   onConnect,
   onConnectionsChanged,
@@ -78,12 +79,17 @@ export function ProfilePanel({
     error?: string
   } | null>(null)
   const [form] = Form.useForm<ProfileFormValues>()
+  const advancedRef = useRef<HTMLDetailsElement>(null)
   const authMethod = Form.useWatch('authMethod', form)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
   const [deleteTargets, setDeleteTargets] = useState<ProfileView[]>([])
   const [deleting, setDeleting] = useState(false)
   const deleteBusy = useRef(false)
-  const selected = profiles.filter(p => selectedIds.has(p.id))
+  const [query, setQuery] = useState('')
+  const [selectionMode, setSelectionMode] = useState(false)
+  const search = query.trim().toLocaleLowerCase()
+  const visibleProfiles = profiles.filter(p => `${p.name} ${p.user}@${p.host}:${p.port}`.toLocaleLowerCase().includes(search))
+  const selected = visibleProfiles.filter(p => selectedIds.has(p.id))
 
   useEffect(() => {
     const available = new Set(profiles.map(p => p.id))
@@ -134,10 +140,15 @@ export function ProfilePanel({
     }
   }
 
+  const validateProfile = () => form.validateFields().catch(error => {
+    if (error?.errorFields?.some((field: { name?: (string | number)[] }) => field.name?.[0] === 'jumps') && advancedRef.current) advancedRef.current.open = true
+    return null
+  })
+
   const saveProfile = async () => {
     // 校验没通过时 antd 已经在字段下渲染了提示：这条拒绝不能被丢成未处理的
     // promise 拒绝（否则整个窗口会被启动期错误面板盖住），停下即可。
-    const values = await form.validateFields().catch(() => null)
+    const values = await validateProfile()
     if (!values) return
     try {
       await invokeAs('profile.save', { profile: values })
@@ -152,7 +163,7 @@ export function ProfilePanel({
   const testProfile = async () => {
     // 校验没通过时 antd 已经在字段下渲染了提示：这条拒绝不能被丢成未处理的
     // promise 拒绝（否则整个窗口会被启动期错误面板盖住），停下即可。
-    const values = await form.validateFields().catch(() => null)
+    const values = await validateProfile()
     if (!values) return
     setTestResult(null)
     try {
@@ -217,8 +228,6 @@ export function ProfilePanel({
     }
   }
 
-  const deleteProfile = (p: ProfileView) => deleteProfiles([p])
-
   const disconnect = async (c: ConnectionInfo) => {
     try {
       await invokeAs('conn.close', { connectionId: c.connectionId })
@@ -249,13 +258,13 @@ export function ProfilePanel({
     if (!conn) return null
     switch (conn.state) {
       case 'ready':
-        return <Badge status="success" text={t('conn.connected')} />
+        return <span title={t('conn.connected')} aria-label={t('conn.connected')}><Badge status="success" /></span>
       case 'connecting':
-        return <Badge status="processing" text={t('conn.connecting')} />
+        return <span title={t('conn.connecting')} aria-label={t('conn.connecting')}><Badge status="processing" /></span>
       case 'needInput':
-        return <Badge status="warning" text={t('conn.needInput')} />
+        return <span title={t('conn.needInput')} aria-label={t('conn.needInput')}><Badge status="warning" /></span>
       case 'failed':
-        return <Badge status="error" text={conn.error?.slice(0, 40) ?? 'failed'} />
+        return <span title={conn.error ?? 'failed'} aria-label={conn.error ?? 'failed'}><Badge status="error" /></span>
       default:
         return null
     }
@@ -307,80 +316,83 @@ export function ProfilePanel({
       <div className="profile-panel-header">
         <Typography.Text strong>{t('conn.title')}</Typography.Text>
         <Space size={4}>
-          <Button size="small" type="text" icon={<ReloadOutlined />} onClick={onConnectionsChanged} />
-          <Button size="small" type="text" icon={<DownloadOutlined />} title={t('conn.import')} onClick={importFromGonavi} />
-          <Button size="small" type="primary" ghost icon={<PlusOutlined />} onClick={() => openForm('new')}>
-            {t('conn.new')}
-          </Button>
+          <Button size="small" type="text" icon={<PlusOutlined />} aria-label={t('conn.new')} onClick={() => openForm('new')}>{t('conn.new')}</Button>
+          <Dropdown trigger={['click']} disabled={deleting} menu={{
+            items: [
+              { key: 'refresh', icon: <ReloadOutlined />, label: t('sftp.refresh') },
+              { key: 'import', icon: <DownloadOutlined />, label: t('conn.import') },
+              { key: 'select', icon: <CheckSquareOutlined />, label: t('conn.batchSelect'), disabled: profiles.length === 0 },
+            ],
+            onClick: ({ key }) => {
+              if (deleteBusy.current) return
+              if (key === 'refresh') onConnectionsChanged()
+              if (key === 'import') void importFromGonavi()
+              if (key === 'select') setSelectionMode(true)
+            },
+          }}>
+            <Button size="small" type="text" icon={<MoreOutlined />} disabled={deleting} title={t('conn.actions')} aria-label={t('conn.actions')} />
+          </Dropdown>
         </Space>
       </div>
 
-      {profiles.length > 0 && (
+      {profiles.length > 0 && <Input className="profile-search" size="small" prefix={<SearchOutlined />} allowClear
+        placeholder={t('conn.search')} aria-label={t('conn.search')} value={query} disabled={deleting}
+        onChange={event => { setQuery(event.target.value); setSelectedIds(new Set()) }} />}
+
+      {selectionMode && (
         <div className="profile-selection-toolbar">
           <Checkbox
             aria-label={t('conn.selectAll')}
-            checked={selected.length === profiles.length}
-            indeterminate={selected.length > 0 && selected.length < profiles.length}
-            disabled={deleting}
-            onChange={event => { if (!deleteBusy.current) setSelectedIds(event.target.checked ? new Set(profiles.map(p => p.id)) : new Set()) }}
+            checked={visibleProfiles.length > 0 && selected.length === visibleProfiles.length}
+            indeterminate={selected.length > 0 && selected.length < visibleProfiles.length}
+            disabled={deleting || visibleProfiles.length === 0}
+            onChange={event => { if (!deleteBusy.current) setSelectedIds(event.target.checked ? new Set(visibleProfiles.map(p => p.id)) : new Set()) }}
           >{t('conn.selectAll')}</Checkbox>
-          <span className="profile-selection-count">{t('conn.selectedCount', { count: selected.length })}</span>
-          <Button size="small" danger disabled={deleting || selected.length === 0} aria-label={t('conn.deleteSelected')} onClick={() => setDeleteTargets(selected)}>
-            {t('conn.deleteSelected')}
-          </Button>
+          <span className="profile-selection-count">{selected.length > 0 ? t('conn.selectedCount', { count: selected.length }) : ''}</span>
+          <Button size="small" type="text" danger icon={<DeleteOutlined />} disabled={deleting || selected.length === 0} title={t('conn.deleteSelected')} aria-label={t('conn.deleteSelected')} onClick={() => setDeleteTargets(selected)} />
+          <Button size="small" type="text" icon={<CloseOutlined />} disabled={deleting} title={t('conn.endSelection')} aria-label={t('conn.endSelection')}
+            onClick={() => { if (!deleteBusy.current) { setSelectionMode(false); setSelectedIds(new Set()) } }} />
         </div>
       )}
 
       {profiles.length === 0 ? (
         <Empty description={t('conn.empty')} style={{ marginTop: 48 }} />
+      ) : visibleProfiles.length === 0 ? (
+        <div className="profile-no-results">{t('conn.noMatches')}</div>
       ) : (
         <div className="conn-cards">
-          {profiles.map(p => {
+          {visibleProfiles.map(p => {
             const conn = connByProfile.get(p.id)
             const ready = conn?.state === 'ready'
             const pending = conn?.state === 'connecting' || conn?.state === 'needInput'
             return (
-              <div key={p.id} className="conn-card">
+              <div key={p.id} className={`conn-card${ready ? ' is-connected' : ''}${p.id === activeProfileId ? ' is-active' : ''}`}>
                 <div className="conn-card-head">
-                  <Checkbox aria-label={t('conn.selectProfile', { name: p.name })} checked={selectedIds.has(p.id)} disabled={deleting} onChange={event => toggleSelected(p.id, event.target.checked)} />
-                  <div className="conn-card-name">
-                    <span className="conn-name" title={p.name}>{p.name}</span>
-                    <div className="conn-card-tags">
-                      <Tag bordered={false} className="conn-auth-tag">{t(`auth.${p.authMethod}`)}</Tag>
-                      {(p.jumps?.length ?? 0) > 0 && (
-                        <Tag bordered={false} color="geekblue" className="conn-auth-tag">{`⇢ ${p.jumps!.length}`}</Tag>
-                      )}
-                    </div>
-                  </div>
-                  {ready ? (
-                    <Button size="small" danger ghost className="conn-action" disabled={deleting} onClick={() => disconnect(conn!)}>
-                      {t('conn.disconnect')}
-                    </Button>
-                  ) : (
-                    <Button
-                      size="small"
-                      type="primary"
-                      ghost
-                      className="conn-action"
-                      loading={pending}
-                      disabled={deleting}
-                      onClick={() => onConnect(p)}
-                    >
-                      {t('conn.connect')}
-                    </Button>
+                  {selectionMode && <Checkbox aria-label={t('conn.selectProfile', { name: p.name })} checked={selectedIds.has(p.id)} disabled={deleting} onChange={event => toggleSelected(p.id, event.target.checked)} />}
+                  <button type="button" className="conn-open" aria-label={`${t('conn.connect')} ${p.name}`} aria-current={p.id === activeProfileId || undefined} disabled={deleting || pending}
+                    onClick={() => onConnect(p)}>
+                    <span className="conn-symbol" aria-hidden><HddOutlined /></span>
+                    <span className="conn-card-name">
+                      <span className="conn-name-line"><span className="conn-name" title={p.name}>{p.name}</span>{stateBadge(conn)}</span>
+                      <span className="conn-card-addr" title={`${p.user}@${p.host}:${p.port}`}>{p.user}@{p.host}{p.port === 22 ? '' : `:${p.port}`}</span>
+                    </span>
+                  </button>
+                  {ready && (
+                    <Button size="small" type="text" className="conn-action" icon={<DisconnectOutlined />} title={t('conn.disconnect')} aria-label={`${t('conn.disconnect')} ${p.name}`} disabled={deleting} onClick={() => disconnect(conn!)} />
                   )}
-                </div>
-                <div className="conn-card-addr">
-                  {p.user}@{p.host}:{p.port}
-                </div>
-                <div className="conn-card-foot">
-                  <span className="conn-card-state">{stateBadge(conn)}</span>
-                  <span className="conn-card-links">
-                    <a aria-disabled={deleting} onClick={() => { if (!deleteBusy.current) openForm(p) }}>{t('conn.edit')}</a>
-                    <Popconfirm disabled={deleting} title={`${t('conn.delete')} ${p.name}?`} onConfirm={() => deleteProfile(p)}>
-                      <a className="profile-del" aria-disabled={deleting}>{t('conn.delete')}</a>
-                    </Popconfirm>
-                  </span>
+                  <Dropdown trigger={['click']} autoFocus disabled={deleting} menu={{
+                    items: [
+                      { key: 'edit', icon: <EditOutlined />, label: t('conn.edit') },
+                      { key: 'delete', icon: <DeleteOutlined />, label: t('conn.delete'), danger: true },
+                    ],
+                    onClick: ({ key }) => {
+                      if (deleteBusy.current) return
+                      if (key === 'edit') openForm(p)
+                      if (key === 'delete') setDeleteTargets([p])
+                    },
+                  }}>
+                    <Button size="small" type="text" icon={<MoreOutlined />} disabled={deleting} aria-label={`${t('conn.edit')} / ${t('conn.delete')} ${p.name}`} title={`${t('conn.edit')} / ${t('conn.delete')}`} />
+                  </Dropdown>
                 </div>
               </div>
             )
@@ -408,6 +420,8 @@ export function ProfilePanel({
 
       <Modal
         title={editing === 'new' ? t('conn.new') : t('conn.edit')}
+        className="profile-editor"
+        centered
         open={editing !== null}
         onCancel={() => setEditing(null)}
         footer={[
@@ -445,22 +459,24 @@ export function ProfilePanel({
           <Form.Item name="name" label={t('form.name')} rules={[{ required: true }]}>
             <Input />
           </Form.Item>
-          <Space style={{ display: 'flex' }} align="start">
-            <Form.Item name="host" label={t('form.host')} rules={[{ required: true }]} style={{ flex: 1, minWidth: 200 }}>
+          <div className="profile-host-row">
+            <Form.Item name="host" label={t('form.host')} rules={[{ required: true }]}>
               <Input />
             </Form.Item>
             <Form.Item name="port" label={t('form.port')}>
-              <InputNumber min={1} max={65535} style={{ width: 96 }} />
+              <InputNumber min={1} max={65535} style={{ width: '100%' }} />
             </Form.Item>
-          </Space>
-          <Form.Item name="user" label={t('form.user')} rules={[{ required: true }]}>
-            <Input autoComplete="off" />
-          </Form.Item>
-          <Form.Item name="authMethod" label={t('form.authMethod')}>
-            <Select options={authOptions} />
-          </Form.Item>
+          </div>
+          <div className="profile-auth-row">
+            <Form.Item name="user" label={t('form.user')} rules={[{ required: true }]}>
+              <Input autoComplete="off" />
+            </Form.Item>
+            <Form.Item name="authMethod" label={t('form.authMethod')}>
+              <Select options={authOptions} />
+            </Form.Item>
+          </div>
           {authMethod === 'password' && (
-            <Form.Item name="password" label={t('form.password')} extra={t('form.passwordKeep')}>
+            <Form.Item name="password" label={t('form.password')} extra={editing !== 'new' ? t('form.passwordKeep') : undefined}>
               <Input.Password autoComplete="new-password" />
             </Form.Item>
           )}
@@ -469,38 +485,39 @@ export function ProfilePanel({
               <Form.Item name="keyPath" label={t('form.keyPath')} rules={[{ required: true }]}>
                 <Input placeholder="C:\Users\me\.ssh\id_ed25519" />
               </Form.Item>
-              <Form.Item name="passphrase" label={t('form.passphrase')} extra={t('form.passwordKeep')}>
+              <Form.Item name="passphrase" label={t('form.passphrase')} extra={editing !== 'new' ? t('form.passwordKeep') : undefined}>
                 <Input.Password autoComplete="new-password" />
               </Form.Item>
             </>
           )}
-          <Form.Item name="sudoPassword" label={t('form.sudoPassword')} extra={t('form.passwordKeep')}>
-            <Input.Password autoComplete="new-password" />
-          </Form.Item>
-          <Form.Item label={t('form.jumps')}>
-            <Form.List name="jumps">
-              {(fields, { add, remove }) => (
-                <>
-                  {fields.map(field => (
-                    <div key={field.key} className="jump-row">
-                      {jumpItem(field.name)}
-                      <a
-                        className="jump-remove"
-                        onClick={() => remove(field.name)}
-                      >
-                        ✕
-                      </a>
-                    </div>
-                  ))}
-                  {fields.length < 3 && (
-                    <Button size="small" onClick={() => add({ authMethod: 'password', port: 22 })}>
-                      + {t('form.addJump')}
-                    </Button>
-                  )}
-                </>
-              )}
-            </Form.List>
-          </Form.Item>
+          <details ref={advancedRef} className="profile-advanced" open={editing && editing !== 'new' && (editing.jumps?.length ?? 0) > 0 || undefined}>
+            <summary>{t('form.advanced')}</summary>
+            <Form.Item name="sudoPassword" label={t('form.sudoPassword')} extra={editing !== 'new' ? t('form.passwordKeep') : undefined}>
+              <Input.Password autoComplete="new-password" />
+            </Form.Item>
+            <Form.Item label={t('form.jumps')}>
+              <Form.List name="jumps">
+                {(fields, { add, remove }) => (
+                  <>
+                    {fields.map(field => (
+                      <div key={field.key} className="jump-row">
+                        {jumpItem(field.name)}
+                        <Button type="text" size="small" danger icon={<CloseOutlined />} aria-label={t('conn.delete')}
+                          className="jump-remove"
+                          onClick={() => remove(field.name)}
+                        />
+                      </div>
+                    ))}
+                    {fields.length < 3 && (
+                      <Button size="small" icon={<PlusOutlined />} onClick={() => add({ authMethod: 'password', port: 22 })}>
+                        {t('form.addJump')}
+                      </Button>
+                    )}
+                  </>
+                )}
+              </Form.List>
+            </Form.Item>
+          </details>
         </Form>
       </Modal>
     </div>

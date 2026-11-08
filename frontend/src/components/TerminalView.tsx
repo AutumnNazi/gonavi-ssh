@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { Space, Switch, Tag, Tooltip, message } from 'antd'
-import { CopyOutlined, SnippetsOutlined, ThunderboltOutlined } from '@ant-design/icons'
+import { Dropdown, Switch, Tag, Tooltip, message } from 'antd'
+import { CodeOutlined, CopyOutlined, DownOutlined, SnippetsOutlined } from '@ant-design/icons'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
@@ -332,21 +332,30 @@ export function TerminalView({
       invokeAs('terminal.resize', { sessionKey, cols, rows }).catch(() => {})
     })
     let wasVisible = !!hostRef.current?.getClientRects().length
+    // 尺寸不变的重复通知无需 fit；同一帧内的尺寸变化合并处理。
+    let lastFitWidth = 0
+    let lastFitHeight = 0
     let fitPending = false
     const observer = new ResizeObserver(() => {
-      const visible = !!hostRef.current?.getClientRects().length
-      if (visible) {
-        // fit 会反过来改 xterm 自己的尺寸。在 RO 回调里同步做，浏览器会判成
-        // "ResizeObserver loop completed with undelivered notifications"（最大化/
-        // 还原时必现）。挪到下一帧，并合并同一帧内的多次触发。
-        if (!fitPending) {
+      const el = hostRef.current
+      const rect = el?.getBoundingClientRect()
+      const visible = !!el?.getClientRects().length
+      if (visible && rect) {
+        // fit 放到下一帧，避免在 ResizeObserver 回调内同步改变布局。
+        const changed = rect.width !== lastFitWidth || rect.height !== lastFitHeight
+        if (changed && !fitPending) {
           fitPending = true
           requestAnimationFrame(() => {
             fitPending = false
-            if (!stopped && hostRef.current) fit.fit()
+            const current = hostRef.current
+            if (stopped || !current?.getClientRects().length) return
+            const size = current.getBoundingClientRect()
+            lastFitWidth = size.width
+            lastFitHeight = size.height
+            fit.fit()
           })
         }
-        if (!wasVisible && (document.activeElement === document.body || hostRef.current?.contains(document.activeElement))) term.focus()
+        if (!wasVisible && (document.activeElement === document.body || el?.contains(document.activeElement))) term.focus()
       }
       wasVisible = visible
     })
@@ -457,39 +466,47 @@ export function TerminalView({
 
   return (
     <div className="terminal-host">
+      <div ref={hostRef} className="terminal-xterm" />
       <div className="terminal-toolbar">
-        <Space size={12} wrap>
-          <Tooltip title={t('term.broadcastScope')}>
-            <Space size={4}>
-              <Switch size="small" checked={broadcast} onChange={setBroadcast} aria-label={t('term.broadcast')} />
-              <span className="toolbar-label">{t('term.broadcast')}</span>
-              {broadcast && targets().length > 0 && <Tag color="blue">{targets().length + 1}</Tag>}
-            </Space>
-          </Tooltip>
+        <div className="terminal-tools">
           <Tooltip title={t('term.selectionHelp')}>
             <button type="button" className="terminal-action" aria-label={t('term.copy')} disabled={!hasSelection} onClick={event => void copySelection(event.currentTarget)}>
-              <CopyOutlined /> {t('term.copy')}
+              <CopyOutlined />
             </button>
           </Tooltip>
-          <button type="button" className="terminal-action" aria-label={t('form.paste')}
+          <button type="button" className="terminal-action" title={t('form.paste')} aria-label={t('form.paste')}
             onClick={event => pasteClipboard(event.currentTarget)}
           >
-            <SnippetsOutlined /> {t('form.paste')}
+            <SnippetsOutlined />
           </button>
-          <Space size={4}>
-            <ThunderboltOutlined />
-            {quickCommands.map((q, i) => (
-              <Tag key={i} className="quick-cmd" onClick={() => sendRaw(q.command + '\r')}>
-                {q.name}
-              </Tag>
-            ))}
-            <Tag className="quick-cmd" color="red" onClick={() => sendRaw('\x03')}>
-              {t('term.ctrlc')}
-            </Tag>
-          </Space>
-        </Space>
+          <button type="button" className="terminal-action" onClick={() => sendRaw('\x03')}>
+            {t('term.ctrlc')}
+          </button>
+        </div>
+        {quickCommands.length > 0 && (
+          <Dropdown trigger={['click']} autoFocus menu={{
+            items: quickCommands.map((q, i) => ({ key: String(i), label: <span className="saved-command-name" title={q.command}>{q.name}</span> })),
+            onClick: ({ key, domEvent }) => {
+              // 焦点交还终端前消费菜单按键，避免 Enter 再向远端发送一次回车。
+              domEvent?.preventDefault()
+              domEvent?.stopPropagation()
+              const command = quickCommands[Number(key)]
+              if (command) { sendRaw(command.command + '\r'); termRef.current?.focus() }
+            },
+          }}>
+            <button type="button" className="terminal-action terminal-command-trigger" title={t('settings.quick')} aria-label={t('settings.quick')}>
+              <CodeOutlined /><span className="terminal-command-label">{t('settings.quick')}</span><DownOutlined className="terminal-command-chevron" />
+            </button>
+          </Dropdown>
+        )}
+        <Tooltip title={t('term.broadcastScope')}>
+          <div className={`terminal-broadcast${broadcast ? ' is-active' : ''}`}>
+            <span className="toolbar-label">{t('term.broadcast')}</span>
+            <Switch size="small" checked={broadcast} onChange={setBroadcast} aria-label={t('term.broadcast')} />
+            {broadcast && targets().length > 0 && <Tag color="blue">{targets().length + 1}</Tag>}
+          </div>
+        </Tooltip>
       </div>
-      <div ref={hostRef} className="terminal-xterm" />
       {status !== 'running' && (
         <div className="terminal-overlay"><span>{detail}</span></div>
       )}
