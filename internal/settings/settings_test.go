@@ -3,6 +3,7 @@ package settings
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -240,14 +241,19 @@ func TestDangerousMatch(t *testing.T) {
 	}
 }
 
-// 本地路径边界：空=全放；前缀命中放行；盘符大小写与分隔符不敏感。
+// 本地路径边界使用宿主平台规则；只有 Windows 的盘符大小写与分隔符不敏感。
 func TestAllowLocalPath(t *testing.T) {
-	s, _ := Open(t.TempDir())
+	root := t.TempDir()
+	s, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !s.AllowLocalPath("C:/anywhere/secret") {
 		t.Fatal("empty allowlist must permit everything")
 	}
+	allowed := filepath.Join(root, "downloads")
 	base := s.Get()
-	base.LocalPathAllowlist = []string{`C:\Users\me\downloads`, "/tmp"}
+	base.LocalPathAllowlist = []string{allowed, `C:\Users\me\downloads`}
 	if err := s.Update(base); err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -255,9 +261,14 @@ func TestAllowLocalPath(t *testing.T) {
 		path string
 		want bool
 	}{
-		{`C:\Users\me\downloads\a.zip`, true},
-		{"C:/users/ME/downloads/sub/a.zip", true},
-		{"/tmp/x", true},
+		{allowed, true},
+		{filepath.Join(allowed, "a.zip"), true},
+		{filepath.Join(allowed, "sub", "a.zip"), true},
+		{filepath.Join(root, "DOWNLOADS", "a.zip"), runtime.GOOS == "windows"},
+		{filepath.Join(root, "downloads-other", "a.zip"), false},
+		{filepath.Join(allowed, "..", "outside", "a.zip"), false},
+		{`C:\Users\me\downloads\a.zip`, runtime.GOOS == "windows"},
+		{"C:/users/ME/downloads/sub/a.zip", runtime.GOOS == "windows"},
 		{`C:\Users\other\x`, false},
 		{`C:\Users\me2\x`, false}, // 前缀必须按段匹配
 		{"", false},
