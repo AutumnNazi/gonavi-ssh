@@ -176,7 +176,8 @@ function fixture(reply = async () => ({ entries: [], home: '/root' }), overrides
   }
 }
 
-const entry = (name, extra = {}) => ({ name, path: '/root/' + name, size: 12, mode: '-rw-r--r--', isDir: false, isLink: false, mtime: '2026-11-06T14:57:41+08:00', ...extra })
+// 展示的是本地时间，用本地日期构造输入，让 UTC 的 CI 与桌面时区断言相同内容。
+const entry = (name, extra = {}) => ({ name, path: '/root/' + name, size: 12, mode: '-rw-r--r--', isDir: false, isLink: false, mtime: new Date(2026, 10, 6, 14, 57, 41).toISOString(), ...extra })
 
 test('the tree lists the current directory with directories first', async () => {
   const view = fixture(async () => ({ entries: [entry('b.txt'), entry('zdir', { isDir: true }), entry('a.txt')], home: '/root' }))
