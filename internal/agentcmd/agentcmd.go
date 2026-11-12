@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -51,6 +52,21 @@ type BgTask struct {
 }
 
 // taskBuffer 并发安全的限量输出缓冲：ssh 搬运 goroutine 写、
+// cancelSession first cancels only the command. A peer that never acknowledges
+// channel closure must not keep cancelled tasks' goroutines alive indefinitely.
+func cancelSession(conn *sshclient.Conn, session *ssh.Session, done <-chan error) {
+	go session.Close()
+	go func() {
+		timer := time.NewTimer(500 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-done:
+		case <-timer.C:
+			conn.Close()
+		}
+	}()
+}
+
 // TaskStatus 读，互不阻塞。
 type taskBuffer struct {
 	mu  sync.Mutex
@@ -117,60 +133,13 @@ type ExecResult struct {
 	HasExit      bool   `json:"hasExit"`
 	TimedOut     bool   `json:"timedOut"`
 	Bytes        int    `json:"bytes"`
+	Truncated    bool   `json:"truncated"`
 }
 
 // Exec 在新 session 上同步执行命令（CombinedOutput），超时限制在
 // 宿主 30s 调用期限之内。
 func (m *Manager) Exec(ctx context.Context, conn *sshclient.Conn, command string, timeoutMillis int) (ExecResult, error) {
-	if strings.TrimSpace(command) == "" {
-		return ExecResult{}, fmt.Errorf("command is required")
-	}
-	timeout := defaultExecTimeout
-	if timeoutMillis > 0 {
-		timeout = time.Duration(timeoutMillis) * time.Millisecond
-		if timeout > 25*time.Second {
-			timeout = 25 * time.Second
-		}
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	session, err := conn.Client().NewSession()
-	if err != nil {
-		return ExecResult{}, fmt.Errorf("open session: %w", err)
-	}
-	defer session.Close()
-
-	var buf bytes.Buffer
-	// stdout/stderr 必须共用同一个持锁 writer：x/crypto 用两个独立
-	// goroutine 搬运，裸 bytes.Buffer 会数据竞争。
-	limited := &limitedWriter{w: &buf}
-	session.Stdout = limited
-	session.Stderr = limited
-	done := make(chan error, 1)
-	go func() { done <- session.Run(command) }()
-	select {
-	case err := <-done:
-		out := limited.snapshot()
-		res := ExecResult{OutputBase64: base64.StdEncoding.EncodeToString(out), Bytes: len(out)}
-		if err == nil {
-			res.ExitCode, res.HasExit = 0, true
-			return res, nil
-		}
-		if e, ok := err.(*ssh.ExitError); ok {
-			res.ExitCode, res.HasExit = e.ExitStatus(), true
-			return res, nil
-		}
-		return res, err
-	case <-ctx.Done():
-		_ = session.Close()
-		// 关闭后 Run 很快返回；吸收它避免 goroutine 泄漏。
-		go func() { <-done }()
-		out := limited.snapshot()
-		return ExecResult{
-			OutputBase64: base64.StdEncoding.EncodeToString(out),
-			Bytes:        len(out), TimedOut: true,
-		}, nil
-	}
+	return m.exec(ctx, conn, command, "", timeoutMillis, maxOutputBytes)
 }
 
 // ExecSudo 执行白名单内的 sudo 命令。档案带有 Quick Sudo 密码时走
@@ -193,55 +162,61 @@ func (m *Manager) ExecSudo(ctx context.Context, conn *sshclient.Conn, sudoPasswo
 
 // execWithStdin 执行命令并向其 stdin 预写数据（密码注入用）。
 func (m *Manager) execWithStdin(ctx context.Context, conn *sshclient.Conn, command, stdinData string, timeoutMillis int) (ExecResult, error) {
+	return m.exec(ctx, conn, command, stdinData, timeoutMillis, maxOutputBytes)
+}
+
+func (m *Manager) exec(ctx context.Context, conn *sshclient.Conn, command, stdinData string, timeoutMillis, outputLimit int) (ExecResult, error) {
+	if strings.TrimSpace(command) == "" {
+		return ExecResult{}, fmt.Errorf("command is required")
+	}
 	timeout := defaultExecTimeout
 	if timeoutMillis > 0 {
-		timeout = time.Duration(timeoutMillis) * time.Millisecond
-		if timeout > 25*time.Second {
-			timeout = 25 * time.Second
-		}
+		timeout = min(time.Duration(timeoutMillis)*time.Millisecond, 25*time.Second)
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	session, err := conn.Client().NewSession()
+	var buf bytes.Buffer
+	limited := &limitedWriter{w: &buf, limit: outputLimit}
+	session, err := conn.OpenSession(ctx, func(session *ssh.Session) error {
+		session.Stdout, session.Stderr = limited, limited
+		if stdinData != "" {
+			session.Stdin = strings.NewReader(stdinData)
+		}
+		return session.Start(command)
+	})
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return ExecResult{TimedOut: true}, nil
+		}
 		return ExecResult{}, fmt.Errorf("open session: %w", err)
 	}
-	defer session.Close()
-	stdin, err := session.StdinPipe()
-	if err != nil {
-		return ExecResult{}, err
-	}
-	var buf bytes.Buffer
-	limited := &limitedWriter{w: &buf}
-	session.Stdout = limited
-	session.Stderr = limited
+	// Close can wait for transport writes. Never let cleanup extend the caller's
+	// deadline; connection teardown/keepalive owns eventual transport cleanup.
+	defer func() { go session.Close() }()
 	done := make(chan error, 1)
-	go func() { done <- session.Run(command) }()
-	// Run 已启动后再写 stdin：数据进管道缓冲，sudo 读取时即刻可用。
-	_, _ = stdin.Write([]byte(stdinData))
-
+	go func() { done <- session.Wait() }()
+	result := func() ExecResult {
+		out, truncated := limited.snapshot()
+		return ExecResult{OutputBase64: base64.StdEncoding.EncodeToString(out), Bytes: len(out), Truncated: truncated}
+	}
 	select {
 	case err := <-done:
-		_ = stdin.Close()
-		out := limited.snapshot()
-		res := ExecResult{OutputBase64: base64.StdEncoding.EncodeToString(out), Bytes: len(out)}
+		res := result()
 		if err == nil {
 			res.ExitCode, res.HasExit = 0, true
 			return res, nil
 		}
-		if e, ok := err.(*ssh.ExitError); ok {
-			res.ExitCode, res.HasExit = e.ExitStatus(), true
+		var exit *ssh.ExitError
+		if errors.As(err, &exit) {
+			res.ExitCode, res.HasExit = exit.ExitStatus(), true
 			return res, nil
 		}
 		return res, err
 	case <-ctx.Done():
-		_ = session.Close()
-		go func() { <-done }()
-		out := limited.snapshot()
-		return ExecResult{
-			OutputBase64: base64.StdEncoding.EncodeToString(out),
-			Bytes:        len(out), TimedOut: true,
-		}, nil
+		cancelSession(conn, session, done)
+		res := result()
+		res.TimedOut = true
+		return res, nil
 	}
 }
 
@@ -272,28 +247,38 @@ func (m *Manager) RunBg(conn *sshclient.Conn, command string) (string, error) {
 				oldestID, oldest = tid, created
 			}
 		}
-		if oldestID != "" {
-			delete(m.tasks, oldestID)
+		if oldestID == "" {
+			m.mu.Unlock()
+			cancel()
+			return "", fmt.Errorf("background task limit reached (%d running tasks)", maxBgTasks)
 		}
+		delete(m.tasks, oldestID)
 	}
 	m.tasks[id] = task
 	m.mu.Unlock()
 
 	go func() {
-		session, err := conn.Client().NewSession()
+		defer cancel()
+		setupCtx, setupCancel := context.WithTimeout(ctx, defaultExecTimeout)
+		session, err := conn.OpenSession(setupCtx, func(session *ssh.Session) error {
+			session.Stdout, session.Stderr = task.output, task.output
+			return session.Start(command)
+		})
+		setupCancel()
 		if err != nil {
 			task.mu.Lock()
-			task.state, task.err = "failed", err
+			if ctx.Err() != nil {
+				task.state = "cancelled"
+			} else {
+				task.state, task.err = "failed", err
+			}
 			task.mu.Unlock()
 			return
 		}
-		defer session.Close()
-		// 输出直写任务缓冲：运行中 TaskStatus 即可读到增量。
-		session.Stdout = task.output
-		session.Stderr = task.output
+		defer func() { go session.Close() }()
 		done := make(chan error, 1)
 		go func() {
-			done <- session.Run(command)
+			done <- session.Wait()
 		}()
 		select {
 		case err := <-done:
@@ -311,8 +296,7 @@ func (m *Manager) RunBg(conn *sshclient.Conn, command string) (string, error) {
 			}
 			task.mu.Unlock()
 		case <-ctx.Done():
-			_ = session.Close()
-			go func() { <-done }()
+			cancelSession(conn, session, done)
 			task.mu.Lock()
 			task.state = "cancelled"
 			task.mu.Unlock()
@@ -353,6 +337,7 @@ type HostResult struct {
 	HasExit      bool   `json:"hasExit"`
 	TimedOut     bool   `json:"timedOut"`
 	Error        string `json:"error,omitempty"`
+	Truncated    bool   `json:"truncated"`
 }
 
 // ExecMulti 在多台主机上并行执行同一命令，结果按输入顺序返回。
@@ -365,17 +350,29 @@ func (m *Manager) ExecMulti(ctx context.Context, conns []*sshclient.Conn, comman
 		conns = conns[:10]
 	}
 	results := make([]HostResult, len(conns))
+	if len(conns) == 0 {
+		return results
+	}
+	// Share a 512 KiB raw output budget. Base64 plus metadata stays below the
+	// host's 1 MiB response frame, even when all ten hosts fill their share.
+	outputLimit := maxOutputBytes / len(conns)
+	if timeoutMillis <= 0 || timeoutMillis > 20000 {
+		timeoutMillis = 20000
+	}
 	var wg sync.WaitGroup
 	for i, conn := range conns {
 		wg.Add(1)
 		go func(i int, conn *sshclient.Conn) {
 			defer wg.Done()
 			res := HostResult{ConnectionID: conn.ID, Addr: conn.Addr}
-			exec, err := m.Exec(ctx, conn, command, timeoutMillis)
+			exec, err := m.exec(ctx, conn, command, "", timeoutMillis, outputLimit)
 			if err != nil {
 				res.Error = err.Error()
+				if len(res.Error) > 4096 {
+					res.Error = res.Error[:4096]
+				}
 			} else {
-				res.OutputBase64 = exec.OutputBase64
+				res.OutputBase64, res.Truncated = exec.OutputBase64, exec.Truncated
 				res.ExitCode, res.HasExit, res.TimedOut = exec.ExitCode, exec.HasExit, exec.TimedOut
 			}
 			results[i] = res
@@ -457,15 +454,22 @@ func (m *Manager) Triage(ctx context.Context, conn *sshclient.Conn) (map[string]
 
 // limitedWriter 限制输出总量，防止失控命令撑爆内存。
 type limitedWriter struct {
-	w  *bytes.Buffer
-	mu sync.Mutex
+	w         *bytes.Buffer
+	mu        sync.Mutex
+	limit     int
+	truncated bool
 }
 
 func (l *limitedWriter) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.w.Len()+len(p) > maxOutputBytes {
-		remaining := maxOutputBytes - l.w.Len()
+	limit := l.limit
+	if limit <= 0 {
+		limit = maxOutputBytes
+	}
+	if l.w.Len()+len(p) > limit {
+		l.truncated = true
+		remaining := limit - l.w.Len()
 		if remaining > 0 {
 			l.w.Write(p[:remaining])
 		}
@@ -475,10 +479,10 @@ func (l *limitedWriter) Write(p []byte) (int, error) {
 }
 
 // snapshot 持锁拷贝当前输出，供调用方在 Run 尚未返回时安全读取。
-func (l *limitedWriter) snapshot() []byte {
+func (l *limitedWriter) snapshot() ([]byte, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return append([]byte{}, l.w.Bytes()...)
+	return append([]byte{}, l.w.Bytes()...), l.truncated
 }
 
 func parseLoad(uptimeText string) []float64 {

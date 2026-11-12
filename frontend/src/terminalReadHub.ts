@@ -26,6 +26,8 @@ export interface TerminalReadSink {
 
 const READ_MAX_BYTES = 65536
 const WAIT_MILLIS = 20000
+const MAX_BATCH_SESSIONS = 32
+const BATCH_WAIT_MILLIS = 250
 // 瞬时错误（桥忙/超时）退避重试；连续失败才放弃，与单标签轮询时的策略一致。
 const RETRY_MAX = 8
 const RETRY_BASE_MS = 500
@@ -68,19 +70,24 @@ async function pump(): Promise<void> {
   if (running) return
   running = true
   let retries = 0
+  let cursor = 0
   try {
     while (sinks.size > 0) {
-      const sessionKeys = [...sinks.keys()].filter(key => !ended.has(key))
-      if (sessionKeys.length === 0) break
+      const keys = [...sinks.keys()].filter(key => !ended.has(key))
+      if (keys.length === 0) break
+      const start = cursor % keys.length
+      const sessionKeys = [...keys.slice(start), ...keys.slice(0, start)].slice(0, MAX_BATCH_SESSIONS)
       const controller = new AbortController()
       inFlight = { controller, sessionKeys }
       try {
         const res = await invokeAs<{ events?: ReadEvent[] }>('terminal.readMulti', {
           sessionKeys,
           maxBytes: READ_MAX_BYTES,
-          waitMillis: WAIT_MILLIS,
+          // 多批次时缩短等待，安静的会话不能让下一批饿等 20 秒。
+          waitMillis: keys.length > MAX_BATCH_SESSIONS ? BATCH_WAIT_MILLIS : WAIT_MILLIS,
         }, { signal: controller.signal })
         retries = 0
+        cursor = (start + sessionKeys.length) % keys.length
         for (const event of res?.events ?? []) deliver(event)
       } catch (e) {
         // 自己打断的调用不是故障：立刻带上新的会话集合重发（数据仍在

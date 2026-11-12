@@ -3,6 +3,7 @@ package transfer
 import (
 	"bytes"
 	"context"
+	"io"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -13,6 +14,29 @@ type progressRecorder struct {
 	mu     sync.Mutex
 	offset int64
 	task   Task
+}
+
+type shortWriter struct{}
+
+func (shortWriter) Write(p []byte) (int, error) { return len(p) - 1, nil }
+
+type cancellingEOFReader struct{ cancel context.CancelFunc }
+
+func (r cancellingEOFReader) Read(p []byte) (int, error) {
+	r.cancel()
+	return copy(p, "last bytes"), io.EOF
+}
+
+func TestCopyRejectsShortWriteAndCancellationAtEOF(t *testing.T) {
+	var task Task
+	if err := copyWithProgress(context.Background(), shortWriter{}, strings.NewReader("data"), &task, 0); err != io.ErrShortWrite {
+		t.Fatalf("short write=%v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := copyWithProgress(ctx, &bytes.Buffer{}, cancellingEOFReader{cancel}, &task, 0); err != context.Canceled {
+		t.Fatalf("cancelled EOF=%v", err)
+	}
 }
 
 // copyWithProgress 进度推进与取消传播（不依赖真实 sftp）。

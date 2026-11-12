@@ -3,6 +3,9 @@ dist/
 package/
 node_modules/
 frontend/node_modules/
+output/
+go.work
+go.work.sum
 *.zip
 *.tgz
 

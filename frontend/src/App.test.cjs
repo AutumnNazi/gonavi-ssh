@@ -205,6 +205,40 @@ test('opening an already connected profile returns to its terminal without creat
   } finally { view.unmount() }
 })
 
+test('background terminal directories stay with their own sessions when switching hosts', async () => {
+  const view = fixture(async (command, args) => {
+    if (command === 'conn.open') return { connectionId: 'c-' + args.profileId, profileId: args.profileId, state: 'ready' }
+    if (command === 'terminal.open') return { sessionKey: 's-' + args.connectionId }
+    if (command === 'settings.get') return { settings: { ...SETTINGS, showFileTree: true, cwdFollow: true } }
+    return {}
+  })
+  try {
+    await view.settle()
+    await view.connect({ ...PROFILE, id: 'host1' })
+    await view.settle()
+    const first = terminalNode(view)
+    first.props.onCwd('/host1/start')
+    await view.settle()
+    await view.connect({ ...PROFILE, id: 'host2' })
+    await view.settle()
+    const tabs = () => view.find(node => node.props?.type === 'editable-card', view.tabContent('terminals'))
+    const second = tabs().props.items[1].children
+    second.props.onCwd('/host2/logs')
+    await view.settle()
+    first.props.onCwd('/host1/background')
+    await view.settle()
+    assert.equal(treeNode(view).props.connectionId, 'c-host2')
+    assert.equal(treeNode(view).props.jump.path, '/host2/logs')
+    const files = view.find(node => node.type === 'SftpPanel', view.tabContent('files'))
+    assert.equal(files.props.initialRemotePath, '/host2/logs')
+    assert.equal(files.props.initialRemoteConnectionId, 'c-host2')
+    tabs().props.onChange(tabs().props.items[0].key)
+    await view.settle()
+    assert.equal(treeNode(view).props.connectionId, 'c-host1')
+    assert.equal(treeNode(view).props.jump.path, '/host1/background')
+  } finally { view.unmount() }
+})
+
 test('following is only passed to the terminal while the file browser is on screen', async () => {
   // 跟随开关长在文件浏览面板上：面板没显示就没有可跟随的东西，此时还让终端
   // 往远端注钩子，用户只会平白看到远端执行了一串 shell 代码。

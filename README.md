@@ -45,15 +45,27 @@ scripts/package.sh  组装插件包（三平台二进制 + 前端 + 清单 → z
 
 ## 开发
 
-依赖：Go 1.26.0+、Node 18+；`go.mod` 中 SDK 通过 replace 指向本机 GoNavi 仓库
-（`E:/code/GoNavi/sdk/go`，按需修改）。
+依赖：Go 1.26.0+、Node 20+。GoNavi SDK 使用仓库内固定的上游源码快照，
+无需另一份宿主仓库或修改本机绝对路径；来源、许可证与升级方式见
+`third_party/gonavi-sdk/UPSTREAM.md`。联调其他 SDK 可通过本地 `go.work` 覆盖。
 
 ```sh
 go test ./...                        # 后端测试
-(cd frontend && npm install && npm run build)  # 首次准备依赖 / 单独构建
+go vet ./...                         # 后端静态检查
+(cd frontend && npm ci && npm test && npm run build)
+node scripts/ui-smoke.mjs            # 真实 React/AntD + 构建产物的浏览器回归
 node --test scripts/package.test.mjs           # 打包行为回归（临时目录）
 bash scripts/package.sh                       # 组包 → dist/*.zip
 ```
+
+UI 回归脚本自行启动临时本地服务器并注入模拟宿主桥，不连接真实服务器。
+Windows 默认使用已安装的 Edge，也可通过 `UI_BROWSER` 指定浏览器可执行文件；
+其他环境先在 `frontend/` 运行 `npx playwright install chromium`。
+脚本断言新版连接搜索、侧栏收起/展开、设置分组切换、文件列头，以及根节点、资源加载、浏览器异常、加载期禁止保存和连续保存两个文件，
+失败返回非零退出码；截图写入 `output/playwright/`。
+设置 `UI_ASSET_ROOT` 为最终 ZIP 解包后的 `frontend/` 绝对目录，可直接验收交付包里的界面。
+`--inject-page-error` 用于验证失败检测，预期退出码为 1。
+GitHub Actions 已串联后端 race/vet、前端测试/构建、浏览器回归和打包测试。
 
 组包默认读取 `gonavi.plugin.json` 的 `id` 与 `version`，输出为 `dist/gh-autumnnazi.ssh-<版本>.zip`；显式传入版本（如 `bash scripts/package.sh <版本>`）必须与清单一致，否则在构建与修改产物前停止。组包直接用现有 Node 执行本地 TypeScript 类型检查与 Vite 构建，失败即停止，不调用 npm 包装器，也不安装依赖。ZIP 仅包含 `bin/`、`frontend/` 和 `gonavi.plugin.json`，条目不带 `./`；重打时清除旧归档，避免残留资源。最终验收应对该 ZIP 运行宿主 `inspect`，不能只检查 `package/` 目录。
 
@@ -108,10 +120,13 @@ GoNavi 自带 MCP Server 时可被外部编码代理调用。写效果命令统�
 - 密码 / 私钥（含口令）/ SSH Agent / 无认证
 - Quick Sudo：档案级 sudo 密码（加密存储）自动注入，支持一次性动态码参数
 - 主机密钥 TOFU（含每一跳）：变更拒绝并报新旧指纹；known_hosts 可在设置中查看/删除
+- 凭据解密失败时保留原始密文，保存其他档案不会丢掉恢复机会；跳板凭据损坏也标记档案不可用。档案与设置写盘失败时回滚内存状态。
 
 **SFTP**
 - 双栏浏览（面包屑导航 + 前进/后退 + 路径编辑 + 磁盘用量），每栏通过一个来源菜单切换本机或服务器；文件按名称、大小、修改时间对齐显示，窄栏自动隐藏时间列
 - 上传/下载：原生文件/目录选择器、进度/速率、取消、断点续传、原子替换
+- 传输最多全局 4 项、每连接 2 项并行，最多 200 项未完成任务；跨服务器任务占用双方额度，同一目标串行写入。上传覆盖保留目标权限，新文件继承来源权限（Windows 本地文件没有 POSIX 权限，新建远端文件使用 `0600`）；失败或取消会尝试清理远端临时文件，清理失败会保留临时路径及错误详情。
+- 目录分页复用最多 30 秒的有界快照；第一页刷新和文件操作会更新或失效缓存。
 - 远端复制（服务器端流式）、重命名、新建、chmod、递归删除、小文件预览编辑
 - 终端页左侧远端文件面板复用同一套传输与远端动作，下载目录可单独指定（两处面板同一份后端队列，不各养一套状态机）
 - 行右键菜单：打开（内置预览编辑）、用本机程序打开、上传/下载、重命名、删除、新建、复制路径，以及「在终端中 cd 到此目录」。双击文件等同「打开」
@@ -119,6 +134,9 @@ GoNavi 自带 MCP Server 时可被外部编码代理调用。写效果命令统�
 
 **Agent 工具**
 - `agent.exec` / `execSudo`（白名单）/ `execMulti`（≤10 主机并行汇总）/ `runBg` + `taskStatus` + `taskCancel` / `metrics` / `triage`
+- 批量执行共享 512 KiB 原始输出额度，响应以 `truncated` 标记截断；后台运行任务最多 50 项。
+- 命令超时包含 SSH 通道、PTY、Shell 初始化。初始化卡住时断开无响应连接以释放挂起操作；运行中超时先关闭该会话，500ms 后仍无法收尾才断开连接。
+- `historyEnabled=false` 会立即停止并清除现有会话的插件历史记录，包括尚未提交的输入；远端 shell 自己的历史不受影响。
 - 只读模式：只限制本条 Agent 通道——除巡检白名单外禁止 Agent 执行命令、`runBg` 直接拒绝；人工操作不受影响
 - 危险命令确认门（force 二次确认）、本地路径边界
 

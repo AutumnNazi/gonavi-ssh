@@ -39,9 +39,8 @@ export default function App() {
   const [challengeQueue, setChallengeQueue] = useState<{ conn: ConnectionInfo; ch: Challenge }[]>([])
   const [answers, setAnswers] = useState<string[]>([])
   const [settings, setSettings] = useState<PluginSettings | null>(null)
-  const [cwd, setCwd] = useState<string | null>(null)
-  // 文件浏览跳转目标：终端目录（跟随开关打开时）或命中的跳转命令。
-  const [treeJump, setTreeJump] = useState<TreeJump | null>(null)
+  // 后台终端也会报告目录；目录和跳转目标必须始终归属于产生它的会话。
+  const [directories, setDirectories] = useState<Record<string, { cwd: string | null; jump: TreeJump | null }>>({})
   // 文件浏览的本地覆盖：null＝跟随设置，true＝跳转命令临时显示，false＝刚被收起。
   // 跳转要能在设置关着的时候也让用户看见目标目录，但不该改掉持久化设置；
   // 收起则要立刻生效——设置读不到（settings 还是 null）时也不能点了没反应。
@@ -96,6 +95,9 @@ export default function App() {
   const followTree = !!settings?.cwdFollow
   // 文件浏览服务当前活动终端：它跟着活动标签的连接走，不另选档案。
   const activeTab = tabs.find(tab => tab.tabKey === activeKey) ?? tabs[tabs.length - 1]
+  const activeDirectory = activeTab?.sessionKey ? directories[activeTab.sessionKey] : undefined
+  const cwd = activeDirectory?.cwd ?? null
+  const treeJump = activeDirectory?.jump ?? null
 
   // 「在终端中 cd 到此目录」：把一行 cd 写进活动终端。路径必须引起来——远端目录名
   // 带空格是常态，裸拼会被 shell 拆成多条参数。
@@ -142,11 +144,14 @@ export default function App() {
   //
   // 跟随时**直接**跳，不能只等 OSC7 上报——已经在目标目录时 cd 是空操作、cwd 不变，
   // 上报根本不会发生，面板会一动不动。没开跟随时面板不动：它的位置归那个开关管。
-  const jumpTree = useCallback((path: string) => {
+  const jumpTree = useCallback((sessionKey: string, path: string) => {
     if (!followTree) return
-    setTreeOverride(true)
-    setTreeJump(prev => ({ path, seq: (prev?.seq ?? 0) + 1 }))
-  }, [followTree])
+    if (sessionKey === activeTab?.sessionKey) setTreeOverride(true)
+    setDirectories(prev => ({ ...prev, [sessionKey]: {
+      cwd: prev[sessionKey]?.cwd ?? null,
+      jump: { path, seq: (prev[sessionKey]?.jump?.seq ?? 0) + 1 },
+    } }))
+  }, [followTree, activeTab?.sessionKey])
 
   const collapseTree = useCallback(() => {
     setTreeOverride(false)
@@ -159,13 +164,16 @@ export default function App() {
   // 只在目录**真的变了**的时候动面板。上报钩子挂在 PROMPT_COMMAND 上，用户每敲
   // 一条命令、每回一次车都会上报一次；拿没变的目录去"跟随"，等于每次回车都把面板
   // 重载一遍——选中项被清空、跳转被顶掉，人在终端里干活却一直波及旁边这块面板。
-  const lastCwdRef = useRef<string | null>(null)
   const handleCwd = useCallback(
-    (path: string) => {
-      setCwd(path)
-      if (lastCwdRef.current === path) return
-      lastCwdRef.current = path
-      if (followTree) setTreeJump(prev => ({ path, seq: (prev?.seq ?? 0) + 1 }))
+    (sessionKey: string, path: string) => {
+      setDirectories(prev => {
+        const prior = prev[sessionKey]
+        if (prior?.cwd === path) return prev
+        return { ...prev, [sessionKey]: {
+          cwd: path,
+          jump: followTree ? { path, seq: (prior?.jump?.seq ?? 0) + 1 } : prior?.jump ?? null,
+        } }
+      })
     },
     [followTree],
   )
@@ -173,11 +181,14 @@ export default function App() {
   // 打开跟随的那一刻让面板就位：面板可能停在 a、终端在 b，开启后应当立刻跟到 b，
   // 而不是干等下一次 cd。
   useEffect(() => {
-    if (!followTree) return
-    const current = lastCwdRef.current
-    if (!current) return
-    setTreeJump(prev => ({ path: current, seq: (prev?.seq ?? 0) + 1 }))
-  }, [followTree])
+    const sessionKey = activeTab?.sessionKey
+    if (!followTree || !sessionKey) return
+    setDirectories(prev => {
+      const current = prev[sessionKey]
+      if (!current?.cwd || current.jump?.path === current.cwd) return prev
+      return { ...prev, [sessionKey]: { ...current, jump: { path: current.cwd, seq: (current.jump?.seq ?? 0) + 1 } } }
+    })
+  }, [followTree, activeTab?.sessionKey])
 
   // 关窗会让还没跑完的传输停在 interrupted，重开窗口时提示一次，
   // 用户才知道要去文件页点续传，而不是以为传输失败要重来。
@@ -345,14 +356,18 @@ export default function App() {
   )
 
   const closeTab = useCallback((tabKey: string) => {
-    setTabs(prev => {
-      const tab = prev.find(t => t.tabKey === tabKey)
-      if (tab?.sessionKey) {
-        invokeAs('terminal.close', { sessionKey: tab.sessionKey }).catch(() => {})
-      }
-      return prev.filter(t => t.tabKey !== tabKey)
-    })
-  }, [])
+    const tab = tabs.find(t => t.tabKey === tabKey)
+    if (tab?.sessionKey) {
+      const sessionKey = tab.sessionKey
+      invokeAs('terminal.close', { sessionKey }).catch(() => {})
+      setDirectories(prev => {
+        const next = { ...prev }
+        delete next[sessionKey]
+        return next
+      })
+    }
+    setTabs(prev => prev.filter(t => t.tabKey !== tabKey))
+  }, [tabs])
 
   // 宿主窗口标题栏上的关闭按钮插件拦不到，这里给出窗口内的关闭入口：
   // 还有传输在跑时先确认一次，避免用户以为关窗后传输还在继续。
@@ -455,8 +470,8 @@ export default function App() {
                                 key={tab.tabKey}
                                 tab={tab}
                                 allTabs={tabs}
-                                onCwd={handleCwd}
-                                onJump={jumpTree}
+                                onCwd={path => { if (tab.sessionKey) handleCwd(tab.sessionKey, path) }}
+                                onJump={path => { if (tab.sessionKey) jumpTree(tab.sessionKey, path) }}
                                 // 跟随开关长在文件浏览面板上，面板没显示就没有可跟随的
                                 // 东西——这时还往远端注钩子，用户只会平白看到它在远端
                                 // 执行了一串 shell 代码。
@@ -483,6 +498,7 @@ export default function App() {
                     connections={connections}
                     onConnectionsChanged={refreshConnections}
                     initialRemotePath={cwd}
+                    initialRemoteConnectionId={activeTab?.connectionId ?? null}
                     onCdTo={remotePath => void cdToRemotePath(remotePath)}
                   />
                 ),

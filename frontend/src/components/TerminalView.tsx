@@ -22,10 +22,6 @@ interface WriteRequest {
   args: { sessionKey?: string; sessionKeys?: string[]; dataBase64: string }
 }
 
-// OSC 7（shell 工作目录通知）：xterm 输出流里匹配 file://host/path，
-// 需用户在远端 shell 配置 PROMPT_COMMAND 才会发。
-const osc7Re = /\x1b\]7;file:\/\/[^\x07\x1b\/]*([^\x07\x1b]*?)((\x1b\\)|\x07)/g
-
 interface Props {
   tab: TerminalTab
   allTabs: TerminalTab[]
@@ -275,6 +271,13 @@ export function TerminalView({
       cursorBlink: true,
       scrollback: 5000,
     })
+    // xterm 自带的流解析器保留跨分片状态，并逐条派发同一分片里的通知。
+    const cwdSub = term.parser.registerOscHandler(7, data => {
+      if (stopped || inputStateRef.current !== 'running') return true
+      const match = /^file:\/\/[^/]*(\/[^\x00-\x1f]*)$/.exec(data)
+      if (match) onCwdRef.current(match[1])
+      return true
+    })
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(hostRef.current!)
@@ -376,9 +379,6 @@ export function TerminalView({
         const text = echoRef.current!.consume(redactRef.current!.filter(decodeChunk(dataBase64)))
         if (!text) return
         term.write(text)
-        osc7Re.lastIndex = 0
-        const m = osc7Re.exec(text)
-        if (m && m[1]) onCwdRef.current(m[1])
       },
       onEnd: (hasExit, exitCode) => {
         if (!stillReading()) return
@@ -409,6 +409,7 @@ export function TerminalView({
       dataSub.dispose()
       resizeSub.dispose()
       selectionSub.dispose()
+      cwdSub.dispose()
       if (termRef.current === term) termRef.current = null
       term.dispose()
     }

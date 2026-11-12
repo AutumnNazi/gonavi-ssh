@@ -103,6 +103,9 @@ type Profile struct {
 	// CorruptSecrets 标记密文解密失败（密钥文件更换/文件损坏），
 	// 对外提示用户重录密码而不是呈现莫名的认证失败。
 	CorruptSecrets bool `json:"-"`
+	// Keep unreadable ciphertext until that credential is explicitly replaced.
+	// An unrelated save must not destroy data recoverable with the original key.
+	unreadable storedProfile
 
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
@@ -137,6 +140,7 @@ type Sanitized struct {
 	HasSudoPassword bool       `json:"hasSudoPassword"`
 	// CorruptSecrets 为 true 时已存密码无法解密，UI 应提示重录。
 	CorruptSecrets bool      `json:"corruptSecrets,omitempty"`
+	CorruptJumps   bool      `json:"corruptJumps,omitempty"`
 	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
@@ -171,6 +175,7 @@ func (p Profile) Sanitized() Sanitized {
 		HasPassword: p.HasPassword(), HasPassphrase: p.HasPassphrase(),
 		HasSudoPassword: p.SudoPassword != "",
 		CorruptSecrets:  p.CorruptSecrets,
+		CorruptJumps:    p.unreadable.JumpsSealed != "",
 		UpdatedAt:       p.UpdatedAt,
 	}
 }
@@ -327,6 +332,7 @@ func Open(dir string) (*Store, error) {
 				p.Password = plain
 			} else {
 				p.CorruptSecrets = true
+				p.unreadable.PasswordSealed = sp.PasswordSealed
 			}
 		}
 		if sp.PassphraseSealed != "" {
@@ -334,6 +340,7 @@ func Open(dir string) (*Store, error) {
 				p.Passphrase = plain
 			} else {
 				p.CorruptSecrets = true
+				p.unreadable.PassphraseSealed = sp.PassphraseSealed
 			}
 		}
 		if sp.SudoPasswordSealed != "" {
@@ -341,14 +348,18 @@ func Open(dir string) (*Store, error) {
 				p.SudoPassword = plain
 			} else {
 				p.CorruptSecrets = true
+				p.unreadable.SudoPasswordSealed = sp.SudoPasswordSealed
 			}
 		}
 		if sp.JumpsSealed != "" {
+			p.unreadable.JumpsSealed = sp.JumpsSealed
 			if plain, derr := s.sealOpen(sp.JumpsSealed); derr == nil {
 				if jumps, jerr := unmarshalJumps([]byte(plain)); jerr == nil {
 					p.Jumps = jumps
+					p.unreadable.JumpsSealed = ""
 				}
 			}
+			p.CorruptSecrets = p.CorruptSecrets || p.unreadable.JumpsSealed != ""
 		}
 		s.profiles[p.ID] = p
 	}
@@ -365,7 +376,7 @@ func (s *Store) List() []Profile {
 func (s *Store) listLocked() []Profile {
 	out := make([]Profile, 0, len(s.profiles))
 	for _, p := range s.profiles {
-		out = append(out, p)
+		out = append(out, cloneProfile(p))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
@@ -381,11 +392,21 @@ func (s *Store) Get(id string) (Profile, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p, ok := s.profiles[id]
-	return p, ok
+	return cloneProfile(p), ok
+}
+
+func cloneProfile(p Profile) Profile {
+	if p.Jumps != nil {
+		p.Jumps = append([]Jump{}, p.Jumps...)
+	}
+	return p
 }
 
 // Upsert 新建或更新档案。id 为空时生成新 ID；更新时敏感字段留空表示沿用旧值。
 func (s *Store) Upsert(p Profile) (Profile, error) {
+	if p.Jumps != nil {
+		p.Jumps = append([]Jump{}, p.Jumps...)
+	}
 	if err := p.Validate(); err != nil {
 		return Profile{}, err
 	}
@@ -400,6 +421,7 @@ func (s *Store) Upsert(p Profile) (Profile, error) {
 		p.ID = id
 		p.CreatedAt = now
 	} else if old, ok := s.profiles[p.ID]; ok {
+		p.unreadable = old.unreadable
 		p.CreatedAt = old.CreatedAt
 		if p.Password == "" {
 			p.Password = old.Password
@@ -414,42 +436,69 @@ func (s *Store) Upsert(p Profile) (Profile, error) {
 		// 非 nil 时逐跳沿用空密码/口令（编辑表单不回显敏感字段）。
 		if p.Jumps == nil {
 			p.Jumps = old.Jumps
-		} else if len(old.Jumps) > 0 {
-			oldByKey := make(map[Jump][]Jump, len(old.Jumps))
-			for _, oj := range old.Jumps {
-				key := jumpKey(oj)
-				oldByKey[key] = append(oldByKey[key], oj)
-			}
-			// 完全重复身份按出现顺序一对一消费，不让末跳覆盖首跳凭据。
-			for i := range p.Jumps {
-				key := jumpKey(p.Jumps[i])
-				if matches := oldByKey[key]; len(matches) > 0 {
-					oj := matches[0]
-					oldByKey[key] = matches[1:]
-					if p.Jumps[i].Password == "" {
-						p.Jumps[i].Password = oj.Password
-					}
-					if p.Jumps[i].Passphrase == "" {
-						p.Jumps[i].Passphrase = oj.Passphrase
+		} else {
+			p.unreadable.JumpsSealed = ""
+			if len(old.Jumps) > 0 {
+				oldByKey := make(map[Jump][]Jump, len(old.Jumps))
+				for _, oj := range old.Jumps {
+					key := jumpKey(oj)
+					oldByKey[key] = append(oldByKey[key], oj)
+				}
+				// 完全重复身份按出现顺序一对一消费，不让末跳覆盖首跳凭据。
+				for i := range p.Jumps {
+					key := jumpKey(p.Jumps[i])
+					if matches := oldByKey[key]; len(matches) > 0 {
+						oj := matches[0]
+						oldByKey[key] = matches[1:]
+						if p.Jumps[i].Password == "" {
+							p.Jumps[i].Password = oj.Password
+						}
+						if p.Jumps[i].Passphrase == "" {
+							p.Jumps[i].Passphrase = oj.Passphrase
+						}
 					}
 				}
 			}
 		}
 	}
+	if p.Password != "" {
+		p.unreadable.PasswordSealed = ""
+	}
+	if p.Passphrase != "" {
+		p.unreadable.PassphraseSealed = ""
+	}
+	if p.SudoPassword != "" {
+		p.unreadable.SudoPasswordSealed = ""
+	}
+	p.CorruptSecrets = p.unreadable.PasswordSealed != "" || p.unreadable.PassphraseSealed != "" ||
+		p.unreadable.SudoPasswordSealed != "" || p.unreadable.JumpsSealed != ""
 	p.UpdatedAt = now
+	previous, existed := s.profiles[p.ID]
 	s.profiles[p.ID] = p
 	if err := s.flushLocked(); err != nil {
+		if existed {
+			s.profiles[p.ID] = previous
+		} else {
+			delete(s.profiles, p.ID)
+		}
 		return Profile{}, err
 	}
-	return p, nil
+	return cloneProfile(p), nil
 }
 
 // Delete 删除档案；不存在不是错误。
 func (s *Store) Delete(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	previous, existed := s.profiles[id]
 	delete(s.profiles, id)
-	return s.flushLocked()
+	if err := s.flushLocked(); err != nil {
+		if existed {
+			s.profiles[id] = previous
+		}
+		return err
+	}
+	return nil
 }
 
 // flushLocked 把当前档案表整体写回 profiles.json；调用方必须持有锁。
@@ -460,6 +509,8 @@ func (s *Store) flushLocked() error {
 			ID: p.ID, Name: p.Name, Host: p.Host, Port: p.Port, User: p.User,
 			AuthMethod: p.AuthMethod, KeyPath: p.KeyPath,
 			CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt,
+			PasswordSealed: p.unreadable.PasswordSealed, PassphraseSealed: p.unreadable.PassphraseSealed,
+			SudoPasswordSealed: p.unreadable.SudoPasswordSealed, JumpsSealed: p.unreadable.JumpsSealed,
 		}
 		if p.Password != "" {
 			sealed, err := s.sealSeal(p.Password)

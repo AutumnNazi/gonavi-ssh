@@ -65,6 +65,7 @@ type Conn struct {
 	dead       atomic.Bool
 	done       chan struct{}
 	closeOnce  sync.Once
+	retire     func(*Conn) // installed before publication; removes manager indexes
 }
 
 // Client 暴露底层 ssh.Client，供 terminal/sftp 开 channel。
@@ -80,6 +81,9 @@ func (c *Conn) Close() {
 	c.closeOnce.Do(func() {
 		c.dead.Store(true)
 		close(c.done)
+		if c.retire != nil {
+			c.retire(c)
+		}
 		_ = c.client.Close()
 		for i := len(c.via) - 1; i >= 0; i-- {
 			_ = c.via[i].Close()
@@ -159,8 +163,8 @@ type Manager struct {
 	dataDir string
 	hosts   *knownHosts
 
-	// onDead 在连接因 keepalive 失败等原因自然死亡时回调（如清理
-	// 绑定该连接的 sftp client）。注册发生在启动期，运行期只读。
+	// onDead 在连接关闭时回调（如清理绑定该连接的 sftp client）。
+	// 注册发生在启动期，运行期只读；回调异步执行，不阻塞连接关闭。
 	onDead atomic.Pointer[func(string)]
 
 	mu               sync.Mutex
@@ -189,6 +193,9 @@ func NewManager(dataDir string) (*Manager, error) {
 // OpenBegin 开始（或复用）一次连接：立即返回连接 ID。
 // 返回的 state 可能直接是 ready（复用）或 connecting（新拨号）。
 func (m *Manager) OpenBegin(p profile.Profile) Status {
+	if p.CorruptSecrets {
+		return Status{ProfileID: p.ID, State: StateFailed, Error: "stored credentials cannot be decrypted; restore the key or save repaired credentials before connecting"}
+	}
 	m.mu.Lock()
 	if conn, ok := m.byProfile[p.ID]; ok && conn.Alive() {
 		id := conn.ID
@@ -266,7 +273,7 @@ func (m *Manager) finishDial(pend *Pending, p profile.Profile, client *ssh.Clien
 	conn := &Conn{
 		ID: pend.ID, ProfileID: p.ID,
 		Addr: joinAddr(p.Host, p.Port), client: client, via: viaChain,
-		openedAt: time.Now(), done: make(chan struct{}),
+		openedAt: time.Now(), done: make(chan struct{}), retire: m.retire,
 	}
 	conn.touch()
 	m.conns[conn.ID] = conn
@@ -347,6 +354,9 @@ func (m *Manager) dropPending(id string) {
 // 每一跳独立认证、独立 TOFU（按逻辑地址记录，而非隧道地址）。
 // 失败时已建立的跳板链由调用方关闭（防泄漏）；成功时随 Conn.via 生命周期管理。
 func (m *Manager) dialChain(ctx context.Context, p profile.Profile, interactive interactiveFunc) (*ssh.Client, []*ssh.Client, error) {
+	if p.CorruptSecrets {
+		return nil, nil, errors.New("stored credentials cannot be decrypted; restore the key or save repaired credentials before connecting")
+	}
 	var chain []*ssh.Client
 	cleanup := func() {
 		for i := len(chain) - 1; i >= 0; i-- {
@@ -501,7 +511,7 @@ func (m *Manager) dialHop(ctx context.Context, t dialTarget, interactive interac
 	return ssh.NewClient(sshConn, chans, reqs), nil
 }
 
-// OnDead 注册连接自然死亡（keepalive 失败）的回调；启动期调用一次。
+// OnDead 注册连接关闭后的资源清理回调；启动期调用一次。
 func (m *Manager) OnDead(fn func(connectionID string)) {
 	m.onDead.Store(&fn)
 }
@@ -523,12 +533,6 @@ func (m *Manager) keepalive(conn *Conn) {
 			}
 			fails++
 			if fails >= keepaliveFails {
-				conn.dead.Store(true)
-				m.drop(conn)
-				// 联动清理绑定该连接的资源（如 sftp client）。
-				if fn := m.onDead.Load(); fn != nil {
-					go (*fn)(conn.ID)
-				}
 				conn.Close()
 				return
 			}
@@ -555,14 +559,22 @@ func (m *Manager) keepaliveProbe(conn *Conn) bool {
 	}
 }
 
-// drop 把失效连接从索引摘除。
-func (m *Manager) drop(conn *Conn) {
+// retire is called once by Conn.Close, including setup/command timeout paths.
+// Remove only this connection's entries: a replacement may already be alive.
+func (m *Manager) retire(conn *Conn) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if c, ok := m.byProfile[conn.ProfileID]; ok && c == conn {
 		delete(m.byProfile, conn.ProfileID)
 	}
-	delete(m.conns, conn.ID)
+	if m.conns[conn.ID] == conn {
+		delete(m.conns, conn.ID)
+	}
+	m.mu.Unlock()
+	// Resource cleanup may call back into the manager or wait on network I/O.
+	// It must neither hold m.mu nor extend the operation's timeout.
+	if fn := m.onDead.Load(); fn != nil {
+		go (*fn)(conn.ID)
+	}
 }
 
 // KnownHosts 返回全部已信任主机（地址+指纹），供审计与管理。

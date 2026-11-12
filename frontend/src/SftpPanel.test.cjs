@@ -116,6 +116,24 @@ test('choosing a server from a local pane opens exactly that server', async () =
   } finally { view.unmount() }
 })
 
+test('terminal directory notifications only navigate the matching remote connection', async () => {
+  const view = fixture(async command => command === 'sftp.list' ? { entries: [], more: false }
+    : command === 'sftp.pwd' ? { path: '/home/ops' }
+    : command === 'fs.listLocal' ? { entries: [], home: '' } : { tasks: [] })
+  try {
+    await view.settle()
+    view.calls.length = 0
+    view.props.initialRemoteConnectionId = 'ready-b'
+    view.props.initialRemotePath = '/only-on-b'
+    await view.settle()
+    assert.equal(view.calls.some(call => call.command === 'sftp.list' && call.args.path === '/only-on-b'), false)
+    view.props.initialRemoteConnectionId = 'ready-a'
+    view.props.initialRemotePath = '/only-on-a'
+    await view.settle()
+    assert.ok(view.calls.some(call => call.command === 'sftp.list' && call.args.connectionId === 'ready-a' && call.args.path === '/only-on-a'))
+  } finally { view.unmount() }
+})
+
 test('late server A list cannot become a server B deletion source', async () => {
   let releaseA
   const pendingA = new Promise(resolve => { releaseA = resolve })

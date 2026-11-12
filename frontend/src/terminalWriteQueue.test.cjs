@@ -480,7 +480,7 @@ function readHub(invokeAs, globals = {}) {
 function readableBridge(requests) {
   return async (command, args, options) => {
     const result = deferred()
-    const request = { sessionKeys: args.sessionKeys, result, aborted: false }
+    const request = { sessionKeys: args.sessionKeys, waitMillis: args.waitMillis, result, aborted: false }
     requests.push(request)
     options.signal.addEventListener('abort', () => {
       request.aborted = true
@@ -489,6 +489,30 @@ function readableBridge(requests) {
     return result.promise
   }
 }
+
+test('more than 32 terminals use bounded fair batches without stopping other terminals', async () => {
+  const requests = [], deliveries = [], failures = [], remove = []
+  const hub = readHub(readableBridge(requests))
+  for (let i = 0; i < 65; i++) remove.push(hub.subscribeTerminalRead('s' + i, {
+    onData: data => deliveries.push(data), onEnd() {}, onUnavailable: error => failures.push(error),
+  }))
+  await tick()
+  const covered = new Set()
+  for (let i = 0; i < 3; i++) {
+    const request = requests.at(-1)
+    assert.ok(request.sessionKeys.length <= 32)
+    assert.ok(request.waitMillis <= 250, 'one quiet batch must not delay all other terminals for 20 seconds')
+    request.sessionKeys.forEach(key => covered.add(key))
+    request.result.resolve({ events: request.sessionKeys.map(sessionKey => ({ sessionKey, dataBase64: sessionKey })) })
+    await tick()
+  }
+  assert.equal(covered.size, 65)
+  assert.ok(deliveries.includes('s64'))
+  assert.equal(failures.length, 0)
+  remove.forEach(off => off())
+  requests.at(-1).result.resolve({ events: [] })
+  await tick()
+})
 
 // 中枢取代了每个标签各自的长轮询：多个终端只应有一条在途 readMulti，
 // 否则标签一多就会把宿主桥的 8 个并发额度占满，按键写入被拒。
@@ -646,6 +670,7 @@ function terminalView(write, clipboard = { writeText: async () => {} }, initialP
   }
   class Terminal {
     constructor(options) { this.options = options; this.selection = ''; this.bufferText = ''; this.focusCount = 0; terminals.push(this) }
+    parser = { registerOscHandler: () => ({ dispose() {} }) }
     loadAddon() {}
     open() {}
     focus() { this.focusCount++; document.activeElement = this.element ??= { insideTerminal: true } }

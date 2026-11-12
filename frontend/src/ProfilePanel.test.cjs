@@ -71,6 +71,25 @@ function fixture(invoke = async () => ({})) {
 }
 const tick = () => new Promise(resolve => setImmediate(resolve))
 
+test('editing damaged jump credentials preserves an empty unseen chain and submits its replacement', async () => {
+  for (const jumps of [[], [{ host: 'replacement', user: 'ops', authMethod: 'agent' }]]) {
+    const view = fixture()
+    view.props.profiles[0].corruptSecrets = true
+    view.props.profiles[0].corruptJumps = true
+    view.render()
+    view.find(node => node.type === 'Dropdown' && node.props.menu.items.some(item => item.key === 'edit')).props.menu.onClick({ key: 'edit' })
+    view.form.validateFields = async () => ({ id: 'a', name: 'renamed', jumps })
+    view.render()
+    const modal = view.find(node => node.type === 'Modal' && node.props.open && node.props.title === 'conn.edit')
+    const save = modal.props.footer.find(button => button.props.children === 'form.save')
+    await save.props.onClick()
+    const saved = view.calls.find(call => call.command === 'profile.save').args.profile
+    if (jumps.length) assert.deepEqual(saved.jumps, jumps)
+    else assert.equal('jumps' in saved, false, 'an unseen damaged jump chain must not be cleared')
+    view.unmount()
+  }
+})
+
 test('null connection lists allow deletion of all disconnected selected profiles', async () => {
   const view = fixture(async command => command === 'conn.status' ? { connections: null } : {})
   view.props.profiles = Array.from({ length: 5 }, (_, i) => ({ ...view.props.profiles[0], id: 'empty-' + i, name: 'Disconnected ' + i }))

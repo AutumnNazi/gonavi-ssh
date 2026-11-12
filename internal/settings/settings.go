@@ -198,8 +198,13 @@ func (s *Store) Update(next Settings) error {
 		next.DownloadDir = s.current.DownloadDir
 	}
 	next = mergeDefaults(next)
+	previous := s.current
 	s.current = next
-	return s.persist()
+	if err := s.persist(); err != nil {
+		s.current = previous
+		return err
+	}
+	return nil
 }
 
 func (s *Store) persist() error {

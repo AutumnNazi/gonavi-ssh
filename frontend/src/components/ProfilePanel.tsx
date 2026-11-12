@@ -151,7 +151,11 @@ export function ProfilePanel({
     const values = await validateProfile()
     if (!values) return
     try {
-      await invokeAs('profile.save', { profile: values })
+      const profile = { ...values }
+      // A damaged encrypted chain is absent from the view, not intentionally
+      // empty. Keep it unless the user supplies a replacement chain.
+      if (editing && editing !== 'new' && editing.corruptJumps && !profile.jumps?.length) delete profile.jumps
+      await invokeAs('profile.save', { profile })
       message.success(values.id ? t('form.save') : t('form.save'))
       setEditing(null)
       onChanged()
@@ -432,6 +436,9 @@ export function ProfilePanel({
         destroyOnClose
         width={560}
       >
+        {editing && editing !== 'new' && editing.corruptSecrets && (
+          <Alert type="warning" showIcon message={t('form.corruptSecrets')} style={{ marginBottom: 12 }} />
+        )}
         {testResult && (
           <Alert
             style={{ marginBottom: 12 }}

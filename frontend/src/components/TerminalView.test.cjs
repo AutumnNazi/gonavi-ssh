@@ -48,9 +48,13 @@ function fixture(options = {}) {
     },
   }
   class Terminal {
-    constructor(options) { this.options = options ?? {}; this.dataHandlers = []; terminals.push(this) }
-    loadAddon() {} open() {} focus() {} fit() {} dispose() {} attachCustomKeyEventHandler() {}
-    write(text) { writes.push(text) }
+    constructor(terminalOptions) {
+      this.options = terminalOptions ?? {}; this.dataHandlers = []; terminals.push(this)
+      if (options.nativeParser) this.native = new (require('@xterm/xterm').Terminal)()
+      this.parser = this.native?.parser ?? { registerOscHandler: () => ({ dispose() {} }) }
+    }
+    loadAddon() {} open() {} focus() {} fit() {} dispose() { this.native?.dispose() } attachCustomKeyEventHandler() {}
+    write(text) { writes.push(text); this.native?.write(text) }
     getSelection() { return '' }
     onData(handler) { this.dataHandlers.push(handler); return { dispose() {} } }
     onResize() { return { dispose() {} } }
@@ -148,6 +152,7 @@ function fixture(options = {}) {
     remote: base64 => { for (const sink of sinks) sink.onData(base64) },
     // 远端输出的 base64（读中枢给的是原始分片）。
     remoteText: text => { for (const sink of sinks) sink.onData(Buffer.from(text, 'utf8').toString('base64')) },
+    parsed: () => new Promise(resolve => terminals.at(-1).native.write('', resolve)),
     // 立刻执行在等的延时任务（注入钩子用了 800ms 延迟避开 shell 启动窗口）。
     // 注入的第二笔是在第一笔之后才排期的，所以默认一直排空；只跑前几轮时传
     // rounds，用例可以卡在两步之间插一手。
@@ -167,6 +172,29 @@ function fixture(options = {}) {
     },
   }
 }
+
+test('OSC7 directory notifications survive every split and multiple sequences using the real xterm parser', async () => {
+  const view = fixture({ nativeParser: true })
+  const paths = []
+  view.props.onCwd = value => paths.push(value)
+  view.render()
+  try {
+    for (const end of ['\x07', '\x1b\\']) {
+      const event = '\x1b]7;file://host/srv/project' + end
+      for (let split = 1; split < event.length; split++) {
+        paths.length = 0
+        view.remoteText(event.slice(0, split))
+        view.remoteText(event.slice(split))
+        await view.parsed()
+        assert.deepEqual(paths, ['/srv/project'], 'split=' + split)
+      }
+    }
+    paths.length = 0
+    view.remoteText('\x1b]7;file://host/first\x07\x1b]7;file://host/last\x07')
+    await view.parsed()
+    assert.deepEqual(paths, ['/first', '/last'])
+  } finally { view.unmount() }
+})
 
 test('a typed key is drawn locally right away and still sent to the remote', async () => {
   const view = fixture({ localEcho: true })

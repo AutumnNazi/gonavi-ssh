@@ -176,6 +176,9 @@ func (s *Session) Write(data []byte) (int, error) {
 // CSI/ESC 转义序列整体跳过（方向键、功能键等不进历史）。转义状态跨调用
 // 延续（s.histEsc），处理被拆开的序列。
 func (s *Session) extractHistoryLocked(data []byte) {
+	if s.histMax <= 0 {
+		return
+	}
 	const (
 		stNormal = 0
 		stEsc    = 1 // 已见 ESC
@@ -327,6 +330,34 @@ func NewManager(historyLimit int) *Manager {
 	return &Manager{sessions: map[string]*Session{}, histLimit: historyLimit, wake: make(chan struct{})}
 }
 
+// SetHistory applies settings to live and future sessions. Disabling also erases
+// partial input and previously recorded lines; enabling starts a fresh line.
+func (m *Manager) SetHistory(enabled bool, limit int) {
+	if !enabled {
+		limit = 0
+	} else if limit <= 0 {
+		limit = 500
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.histLimit = limit
+	for _, session := range m.sessions {
+		session.mu.Lock()
+		if session.histMax == 0 || limit == 0 {
+			session.lineBuf = nil
+			session.histEsc = 0
+			session.suppressNext = false
+		}
+		session.histMax = limit
+		if limit == 0 {
+			session.history = nil
+		} else if len(session.history) > limit {
+			session.history = append([]string{}, session.history[len(session.history)-limit:]...)
+		}
+		session.mu.Unlock()
+	}
+}
+
 // notify 广播唤醒：关闭当前信号通道并换新，所有等待者一起醒来。读方每轮
 // 自己取空全部缓冲，密集输出只会多空转几轮，不会丢数据。
 func (m *Manager) notify() {
@@ -345,42 +376,39 @@ func (m *Manager) wakeChan() <-chan struct{} {
 }
 
 // Open 在连接上开一个新的交互式 PTY 会话。
-func (m *Manager) Open(conn *sshclient.Conn, cols, rows int) (*Session, error) {
+func (m *Manager) Open(ctx context.Context, conn *sshclient.Conn, cols, rows int) (*Session, error) {
 	if cols <= 0 {
 		cols = 80
 	}
 	if rows <= 0 {
 		rows = 24
 	}
-	sshSession, err := conn.Client().NewSession()
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	var stdin io.WriteCloser
+	var stdout, stderr io.Reader
+	sshSession, err := conn.OpenSession(ctx, func(session *ssh.Session) error {
+		modes := ssh.TerminalModes{ssh.ECHO: 1}
+		if err := session.RequestPty("xterm-256color", rows, cols, modes); err != nil {
+			return fmt.Errorf("request pty: %w", err)
+		}
+		var err error
+		if stdin, err = session.StdinPipe(); err != nil {
+			return err
+		}
+		if stdout, err = session.StdoutPipe(); err != nil {
+			return err
+		}
+		if stderr, err = session.StderrPipe(); err != nil {
+			return err
+		}
+		if err := session.Shell(); err != nil {
+			return fmt.Errorf("start shell: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("open ssh session: %w", err)
-	}
-	// xterm-256color 与前端 xterm.js 的 TERM 匹配；回显、行编辑、
-	// Ctrl+C 等终端行为全部交给远端 pty 处理。
-	modes := ssh.TerminalModes{ssh.ECHO: 1}
-	if err := sshSession.RequestPty("xterm-256color", rows, cols, modes); err != nil {
-		_ = sshSession.Close()
-		return nil, fmt.Errorf("request pty: %w", err)
-	}
-	stdin, err := sshSession.StdinPipe()
-	if err != nil {
-		_ = sshSession.Close()
-		return nil, err
-	}
-	stdout, err := sshSession.StdoutPipe()
-	if err != nil {
-		_ = sshSession.Close()
-		return nil, err
-	}
-	stderr, err := sshSession.StderrPipe()
-	if err != nil {
-		_ = sshSession.Close()
-		return nil, err
-	}
-	if err := sshSession.Shell(); err != nil {
-		_ = sshSession.Close()
-		return nil, fmt.Errorf("start shell: %w", err)
 	}
 
 	key, err := newSessionKey()
@@ -391,7 +419,7 @@ func (m *Manager) Open(conn *sshclient.Conn, cols, rows int) (*Session, error) {
 	sess := &Session{
 		Key: key, Conn: conn, session: sshSession, stdin: stdin,
 		openedAt: time.Now(), cols: cols, rows: rows,
-		changed: make(chan struct{}), histMax: m.histLimit, onChange: m.notify,
+		changed: make(chan struct{}), onChange: m.notify,
 	}
 
 	// stdout/stderr 合流进同一缓冲（终端语义下两者交织渲染）。
@@ -404,6 +432,7 @@ func (m *Manager) Open(conn *sshclient.Conn, cols, rows int) (*Session, error) {
 	}()
 
 	m.mu.Lock()
+	sess.histMax = m.histLimit
 	m.sessions[key] = sess
 	m.mu.Unlock()
 	return sess, nil

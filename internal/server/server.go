@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"strings"
+	"sync"
 	"time"
 
 	goplugin "github.com/Syngnat/GoNavi/sdk/go"
@@ -40,14 +41,15 @@ const maxWaitMillis = 25000
 type App struct {
 	// dataDir 插件私有数据目录：「用本机程序打开」抓下来的远端文件落在它的
 	// opened/ 下，和设置、档案同处一地，进程退出也不会跑到别处去。
-	dataDir   string
-	profiles  *profile.Store
-	conns     *sshclient.Manager
-	terms     *terminal.Manager
-	sftp      *sftpops.Manager
-	transfers *transfer.Manager
-	agent     *agentcmd.Manager
-	settings  *settings.Store
+	dataDir    string
+	profiles   *profile.Store
+	conns      *sshclient.Manager
+	terms      *terminal.Manager
+	sftp       *sftpops.Manager
+	transfers  *transfer.Manager
+	agent      *agentcmd.Manager
+	settings   *settings.Store
+	settingsMu sync.Mutex // commits settings and live history policy in the same order
 }
 
 // New 用数据目录构造 App。
@@ -75,6 +77,7 @@ func New(dataDir string) (*App, error) {
 		agent:     agentcmd.NewManager(st),
 	}
 	app.terms = terminal.NewManager(st.Get().HistoryLimit)
+	app.terms.SetHistory(st.Get().HistoryOn(), st.Get().HistoryLimit)
 	// 连接自然死亡（keepalive 失败）时联动清理绑定的 sftp client。
 	conns.OnDead(func(connectionID string) { sftpMgr.Close(connectionID) })
 	return app, nil
@@ -171,10 +174,14 @@ func (a *App) settingsSet(_ context.Context, raw json.RawMessage) (any, error) {
 	if err := decode(raw, &req); err != nil {
 		return nil, err
 	}
+	a.settingsMu.Lock()
+	defer a.settingsMu.Unlock()
 	if err := a.settings.Update(req.Settings); err != nil {
 		return nil, appErr(errBadArgument, err.Error())
 	}
-	return map[string]any{"settings": a.settings.Get()}, nil
+	current := a.settings.Get()
+	a.terms.SetHistory(current.HistoryOn(), current.HistoryLimit)
+	return map[string]any{"settings": current}, nil
 }
 
 // ---------- profile ----------
@@ -282,6 +289,9 @@ func (a *App) profileTest(ctx context.Context, raw json.RawMessage) (any, error)
 		}
 		target = p
 	case req.Profile != nil:
+		if saved, ok := a.profiles.Get(req.Profile.ID); ok && saved.CorruptSecrets {
+			return nil, appErr(errBadArgument, "stored credentials cannot be decrypted; save repaired credentials before testing")
+		}
 		target = req.Profile.toProfile()
 		if err := target.Validate(); err != nil {
 			return nil, appErr(errBadArgument, err.Error())
@@ -406,7 +416,7 @@ func (a *App) sessionTeardown(_ context.Context, raw json.RawMessage) (any, erro
 
 // ---------- terminal ----------
 
-func (a *App) terminalOpen(_ context.Context, raw json.RawMessage) (any, error) {
+func (a *App) terminalOpen(ctx context.Context, raw json.RawMessage) (any, error) {
 	var req struct {
 		ConnectionID string `json:"connectionId"`
 		Cols         int    `json:"cols"`
@@ -419,7 +429,7 @@ func (a *App) terminalOpen(_ context.Context, raw json.RawMessage) (any, error) 
 	if !ok {
 		return nil, appErr(errNotFound, "connection not found or not ready")
 	}
-	sess, err := a.terms.Open(conn, req.Cols, req.Rows)
+	sess, err := a.terms.Open(ctx, conn, req.Cols, req.Rows)
 	if err != nil {
 		return nil, appErr(errSession, err.Error())
 	}

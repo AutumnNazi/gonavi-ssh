@@ -15,6 +15,8 @@ export interface JumpView {
 }
 
 export interface ProfileView {
+	corruptSecrets?: boolean
+	corruptJumps?: boolean
   id: string
   name: string
   host: string

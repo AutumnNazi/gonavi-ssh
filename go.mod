@@ -14,5 +14,5 @@ require (
 	golang.org/x/sys v0.49.0 // indirect
 )
 
-// 本地开发：指向本机 GoNavi 仓库的 SDK。发布前可改为版本号或保留 replace。
-replace github.com/Syngnat/GoNavi/sdk/go => E:/code/GoNavi/sdk/go
+// 固定的上游源码快照；来源和更新方式见 third_party/gonavi-sdk/UPSTREAM.md。
+replace github.com/Syngnat/GoNavi/sdk/go => ./third_party/gonavi-sdk

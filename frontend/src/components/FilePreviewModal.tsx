@@ -31,8 +31,10 @@ const PREVIEW_MAX_BYTES = 262144
 export function FilePreviewModal<T extends PreviewTarget>({ target, onClose, onSaved }: Props<T>) {
   const [draft, setDraft] = useState('')
   const [truncated, setTruncated] = useState(false)
-  const [loaded, setLoaded] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [loadedTarget, setLoadedTarget] = useState<T | null>(null)
+  const savingRequest = useRef<number | null>(null)
+  const loaded = target !== null && loadedTarget === target
   // 打开别的文件、或保存后关窗时，在途的响应不能落到新内容上。
   const seq = useRef(0)
   // 调用方传的多半是内联箭头函数，每次渲染都是新引用。直接写进依赖会让弹窗每
@@ -43,8 +45,9 @@ export function FilePreviewModal<T extends PreviewTarget>({ target, onClose, onS
 
   useEffect(() => {
     const token = ++seq.current
+    setLoadedTarget(null)
     setSaving(false)
-    setLoaded(false)
+    savingRequest.current = null
     setDraft('')
     setTruncated(false)
     if (!target) return
@@ -66,7 +69,7 @@ export function FilePreviewModal<T extends PreviewTarget>({ target, onClose, onS
         }
         setDraft(text)
         setTruncated(!!res.truncated)
-        setLoaded(true)
+        setLoadedTarget(target)
       } catch (e) {
         if (token !== seq.current) return
         message.error(describeError(e))
@@ -77,8 +80,9 @@ export function FilePreviewModal<T extends PreviewTarget>({ target, onClose, onS
   }, [target])
 
   const save = async () => {
-    if (!target || !loaded || truncated || saving) return
+    if (!target || !loaded || truncated || saving || savingRequest.current !== null) return
     const token = seq.current
+    savingRequest.current = token
     setSaving(true)
     try {
       await invokeAs('sftp.writeFile', {
@@ -90,13 +94,17 @@ export function FilePreviewModal<T extends PreviewTarget>({ target, onClose, onS
       setSaving(false)
       // 递增让在途的拉取作废：保存完就关窗，迟到的预览结果不该再翻开。
       seq.current++
+      setLoadedTarget(null)
       message.success(t('sftp.saveFile'))
       saved.current?.(target)
       close.current()
     } catch (e) {
       if (token === seq.current) message.error(describeError(e))
     } finally {
-      if (token === seq.current) setSaving(false)
+      if (savingRequest.current === token) {
+        savingRequest.current = null
+        setSaving(false)
+      }
     }
   }
 
@@ -107,7 +115,7 @@ export function FilePreviewModal<T extends PreviewTarget>({ target, onClose, onS
       onCancel={() => close.current()}
       onOk={() => void save()}
       okText={t('sftp.saveFile')}
-      okButtonProps={{ disabled: truncated || !loaded, loading: saving }}
+      okButtonProps={{ disabled: !loaded || truncated, loading: saving }}
       width={760}
       destroyOnHidden
     >
@@ -119,7 +127,7 @@ export function FilePreviewModal<T extends PreviewTarget>({ target, onClose, onS
         value={draft}
         onChange={e => setDraft(e.target.value)}
         style={{ fontFamily: 'Consolas, monospace' }}
-        readOnly={truncated || !loaded}
+        readOnly={!loaded || truncated || saving}
       />
     </Modal>
   )

@@ -51,6 +51,7 @@ interface Props {
   connections: ConnectionInfo[]
   onConnectionsChanged: () => void
   initialRemotePath?: string | null
+  initialRemoteConnectionId?: string | null
   /** 在活动终端里 cd 到此远端目录（没有可用终端时由上层提示）。 */
   onCdTo?: (remotePath: string) => void
 }
@@ -92,7 +93,7 @@ function useNavHistory() {
   return { push, reset, back, forward, canBack, canForward }
 }
 
-export function SftpPanel({ profiles, connections, onConnectionsChanged, initialRemotePath, onCdTo }: Props) {
+export function SftpPanel({ profiles, connections, onConnectionsChanged, initialRemotePath, initialRemoteConnectionId, onCdTo }: Props) {
   // 对称双栏：左默认本机、右默认服务器（符合常见 FTP 客户端习惯）。
   const [leftKind, setLeftKind] = useState<PaneKind>('local')
   const [leftProfileId, setLeftProfileId] = useState('')
@@ -106,7 +107,7 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
 
   const [rightKind, setRightKind] = useState<PaneKind>('remote')
   const [rightProfileId, setRightProfileId] = useState('')
-  const [rightPath, setRightPath] = useState(initialRemotePath ?? '')
+  const [rightPath, setRightPath] = useState('')
   const [rightEntries, setRightEntries] = useState<FsEntry[]>([])
   const [rightSel, setRightSel] = useState<FsEntry | null>(null)
   const [rightMore, setRightMore] = useState(false)
@@ -324,11 +325,11 @@ export function SftpPanel({ profiles, connections, onConnectionsChanged, initial
   }, [rightConn?.connectionId, rightKind, rightProfileId])
   useEffect(() => {
     // 终端目录跟随：刷新右侧远程（默认栏）到新目录。
-    if (initialRemotePath && rightKind === 'remote' && rightConn) {
+    if (initialRemotePath && rightKind === 'remote' && rightConn && rightConn.connectionId === initialRemoteConnectionId) {
       openSide('right', initialRemotePath)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialRemotePath])
+  }, [initialRemotePath, initialRemoteConnectionId, rightKind, rightConn?.connectionId])
 
   const peerSame = leftKind === 'remote' && rightKind === 'remote' && leftProfileId !== '' && leftProfileId === rightProfileId
 

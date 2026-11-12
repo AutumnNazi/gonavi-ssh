@@ -113,6 +113,68 @@ const deferred = () => {
 
 const at = (path, name) => ({ connectionId: 'c1', path, name })
 
+test('saving is disabled until the current file has loaded', async () => {
+  const reading = deferred()
+  const view = fixture(async command => command === 'sftp.preview' ? reading.promise : {})
+  await view.open(at('/slow.conf', 'slow.conf'))
+  assert.equal(view.modal().props.okButtonProps.disabled, true)
+  assert.equal(view.textarea().props.readOnly, true)
+  view.modal().props.onOk()
+  await view.settle()
+  assert.equal(view.writes().length, 0, 'loading must not write the empty draft')
+  reading.resolve({ dataBase64: 'original' })
+  await view.settle()
+  assert.equal(view.modal().props.okButtonProps.disabled, false)
+})
+
+test('saving one file does not leave the next file permanently busy', async () => {
+  const view = fixture(async command => command === 'sftp.preview' ? { dataBase64: 'original' } : {})
+  for (const name of ['A', 'B']) {
+    await view.open(at('/' + name, name))
+    assert.equal(view.modal().props.okButtonProps.loading, false)
+    view.textarea().props.onChange({ target: { value: 'edited ' + name } })
+    await view.settle()
+    view.modal().props.onOk()
+    await view.settle()
+  }
+  assert.deepEqual(view.writes().map(call => call.args.dataBase64), ['edited A', 'edited B'])
+})
+
+test('closing during a read invalidates its late failure without closing a new editor', async () => {
+  const reading = deferred()
+  const view = fixture(async (command, args) => command === 'sftp.preview'
+    ? args.path === '/A' ? reading.promise : { dataBase64: 'B' }
+    : {})
+  await view.open(at('/A', 'A'))
+  view.modal().props.onCancel()
+  await view.settle()
+  await view.open(at('/B', 'B'))
+  reading.reject(new Error('stale read'))
+  await view.settle()
+  assert.equal(view.modal().props.open, true)
+  assert.equal(view.messages.length, 0)
+})
+
+test('a late save for the previous file cannot clear the next file busy state', async () => {
+  const first = deferred(), second = deferred()
+  const view = fixture(async (command, args) => command === 'sftp.preview' ? { dataBase64: args.path }
+    : args.path === '/A' ? first.promise : second.promise)
+  await view.open(at('/A', 'A'))
+  view.modal().props.onOk()
+  await view.settle()
+  await view.open(at('/B', 'B'))
+  view.modal().props.onOk()
+  await view.settle()
+  first.resolve({})
+  await view.settle()
+  assert.equal(view.modal().props.okButtonProps.loading, true)
+  assert.equal(view.modal().props.open, true)
+  second.resolve({})
+  await view.settle()
+  assert.equal(view.modal().props.open, false)
+  assert.equal(view.closed(), 1)
+})
+
 test('a late response for a previously opened file never lands on the current one', async () => {
   const first = deferred(), second = deferred()
   const view = fixture(async (command, args) =>

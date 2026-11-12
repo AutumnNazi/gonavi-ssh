@@ -42,12 +42,16 @@ type Entry struct {
 
 // Manager 按 connectionId 缓存 sftp.Client。
 type Manager struct {
-	mu      sync.Mutex
-	clients map[string]*sftp.Client
+	mu            sync.Mutex
+	clients       map[string]*sftp.Client
+	listings      map[directoryKey]directorySnapshot
+	listingEpoch  uint64
+	listingReads  map[directoryKey]uint64
+	listingSerial uint64
 }
 
 func NewManager() *Manager {
-	return &Manager{clients: map[string]*sftp.Client{}}
+	return &Manager{clients: map[string]*sftp.Client{}, listings: map[directoryKey]directorySnapshot{}, listingReads: map[directoryKey]uint64{}}
 }
 
 // client 取连接缓存的 SFTP 客户端，没有就建一个。锁只保护连接表：
@@ -92,6 +96,7 @@ func (m *Manager) Close(connectionID string) {
 	m.mu.Lock()
 	c, ok := m.clients[connectionID]
 	delete(m.clients, connectionID)
+	m.invalidateListingsLocked(connectionID)
 	m.mu.Unlock()
 	if !ok {
 		return
@@ -108,6 +113,8 @@ func (m *Manager) CloseAll() {
 		clients = append(clients, c)
 	}
 	m.clients = map[string]*sftp.Client{}
+	m.listings = map[directoryKey]directorySnapshot{}
+	m.listingEpoch++
 	m.mu.Unlock()
 	for _, c := range clients {
 		_ = c.Close()
@@ -123,6 +130,36 @@ func (m *Manager) List(conn *sshclient.Conn, dir string, offset, limit int, sort
 	if limit <= 0 {
 		limit = 500
 	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	if sortBy == "" {
+		sortBy = "name"
+	}
+	key := directoryKey{connectionID: conn.ID, path: remoteClean(dir), sortBy: sortBy}
+	m.mu.Lock()
+	cached, ok := m.listings[key]
+	epoch := m.listingEpoch
+	// A first page is always a fresh read, including the explicit refresh action.
+	if offset > 0 && ok && time.Since(cached.created) < directoryCacheTTL {
+		m.mu.Unlock()
+		return directoryPage(cached.entries, offset, limit)
+	}
+	// A fresh read replaces the previous snapshot even when its result cannot
+	// be cached (size limit or concurrent invalidation). Later pages must never
+	// combine its new first page with entries from the old snapshot.
+	delete(m.listings, key)
+	m.listingSerial++
+	readID := m.listingSerial
+	m.listingReads[key] = readID
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		if m.listingReads[key] == readID {
+			delete(m.listingReads, key)
+		}
+		m.mu.Unlock()
+	}()
 	c, err := m.client(conn)
 	if err != nil {
 		return nil, false, err
@@ -132,20 +169,12 @@ func (m *Manager) List(conn *sshclient.Conn, dir string, offset, limit int, sort
 		return nil, false, fmt.Errorf("read dir: %w", err)
 	}
 	sortEntriesBy(infos, sortBy)
-	end := offset + limit
-	more := false
-	if end < len(infos) {
-		more = true
-		infos = infos[:end]
-	}
-	if offset >= len(infos) {
-		return []Entry{}, false, nil
-	}
-	out := make([]Entry, 0, limit)
-	for _, fi := range infos[offset:] {
+	out := make([]Entry, 0, len(infos))
+	for _, fi := range infos {
 		out = append(out, remoteEntry(dir, fi))
 	}
-	return out, more, nil
+	m.cacheDirectory(key, out, epoch, readID)
+	return directoryPage(out, offset, limit)
 }
 
 // sortEntriesBy 目录优先，其次按声明维度排序（默认名称）。
@@ -201,6 +230,7 @@ func (m *Manager) Stat(conn *sshclient.Conn, path string) (Entry, error) {
 
 // Mkdir 建目录（单层）。
 func (m *Manager) Mkdir(conn *sshclient.Conn, path string) error {
+	defer m.Invalidate(conn.ID)
 	c, err := m.client(conn)
 	if err != nil {
 		return err
@@ -210,6 +240,7 @@ func (m *Manager) Mkdir(conn *sshclient.Conn, path string) error {
 
 // Rename 重命名/移动。
 func (m *Manager) Rename(conn *sshclient.Conn, oldPath, newPath string) error {
+	defer m.Invalidate(conn.ID)
 	c, err := m.client(conn)
 	if err != nil {
 		return err
@@ -219,6 +250,7 @@ func (m *Manager) Rename(conn *sshclient.Conn, oldPath, newPath string) error {
 
 // Chmod 改权限。
 func (m *Manager) Chmod(conn *sshclient.Conn, path string, mode uint32) error {
+	defer m.Invalidate(conn.ID)
 	c, err := m.client(conn)
 	if err != nil {
 		return err
@@ -228,6 +260,7 @@ func (m *Manager) Chmod(conn *sshclient.Conn, path string, mode uint32) error {
 
 // Remove 删除单个文件。
 func (m *Manager) Remove(conn *sshclient.Conn, path string) error {
+	defer m.Invalidate(conn.ID)
 	c, err := m.client(conn)
 	if err != nil {
 		return err
@@ -239,6 +272,7 @@ func (m *Manager) Remove(conn *sshclient.Conn, path string) error {
 // 链接本身，不跟随删穿目标树（对齐 rm -rf 语义）；子条目来自 readdir
 // 的 lstat 语义，天然不跟随。
 func (m *Manager) RemoveRecursive(conn *sshclient.Conn, path string) error {
+	defer m.Invalidate(conn.ID)
 	c, err := m.client(conn)
 	if err != nil {
 		return err
@@ -303,6 +337,7 @@ func (m *Manager) ReadPreview(conn *sshclient.Conn, path string, maxBytes int64)
 // WriteFile 写小文件（覆盖）；大文件请走 transfer 上传。
 // 先写同目录临时文件再原子改名：写入中途失败不会把原文件清空。
 func (m *Manager) WriteFile(conn *sshclient.Conn, path string, content []byte) error {
+	defer m.Invalidate(conn.ID)
 	if len(content) > 512*1024 {
 		return errors.New("content too large; use transfer upload instead")
 	}
@@ -383,6 +418,7 @@ func (m *Manager) Pwd(conn *sshclient.Conn, path string) (string, error) {
 // 直接拒绝（打开源后再截断目标会清空源文件）；先写临时文件再原子改名，
 // 中途失败不会留下半截目标。
 func (m *Manager) Copy(conn *sshclient.Conn, srcPath, dstPath string) error {
+	defer m.Invalidate(conn.ID)
 	c, err := m.client(conn)
 	if err != nil {
 		return err
