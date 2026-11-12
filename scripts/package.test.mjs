@@ -9,7 +9,8 @@ import { test } from 'node:test';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const bash = process.env.BASH_BIN || (process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : 'bash');
-const tar = process.platform === 'win32' ? 'C:/Windows/System32/tar.exe' : 'tar';
+const isWindows = process.platform === 'win32';
+const tar = isWindows ? 'C:/Windows/System32/tar.exe' : 'tar';
 const hash = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 
 function run(command, args, cwd, env, log) {
@@ -21,6 +22,15 @@ function run(command, args, cwd, env, log) {
   } finally {
     fs.closeSync(fd);
   }
+}
+
+// Windows bsdtar supports ZIP; GNU tar on Linux does not. Use the platform's ZIP tools.
+function listZip(f, log) {
+  return run(isWindows ? tar : 'unzip', isWindows ? ['-tf', f.zip] : ['-Z1', f.zip], f.dir, f.env, path.join(f.dir, log));
+}
+
+function extractZip(f, destination, log) {
+  return run(isWindows ? tar : 'unzip', isWindows ? ['-xf', f.zip, '-C', destination] : ['-q', f.zip, '-d', destination], f.dir, f.env, path.join(f.dir, log));
 }
 
 // fixture 构建出的入口文档：按真实构建的样子给——资源是宿主前缀下的绝对路径且真实存在，
@@ -87,7 +97,7 @@ test('declares the selected terminal logo and packages its exact PNG bytes', t =
   assert.equal(built.status, 0, built.output);
   const unpack = path.join(f.dir, 'icon-unpack');
   fs.mkdirSync(unpack);
-  const extracted = run(tar, ['-xf', f.zip, '-C', unpack], f.dir, f.env, path.join(f.dir, 'icon-unpack.log'));
+  const extracted = extractZip(f, unpack, 'icon-unpack.log');
   assert.equal(extracted.status, 0, extracted.output);
   const packaged = JSON.parse(fs.readFileSync(path.join(unpack, 'gonavi.plugin.json'), 'utf8'));
   assert.equal(packaged.icon, manifest.icon);
@@ -120,7 +130,7 @@ test('archive has canonical root entries and all manifest declarations', t => {
   const f = fixture(t);
   const result = f.build();
   assert.equal(result.status, 0, result.output);
-  const list = run(tar, ['-tf', f.zip], f.dir, f.env, path.join(f.dir, 'list.log'));
+  const list = listZip(f, 'list.log');
   assert.equal(list.status, 0, list.output);
   const names = list.output.trim().split(/\r?\n/);
   assert.ok(names.every(name => !name.split('/').includes('.')), 'archive contains ./ path segments');
@@ -133,7 +143,7 @@ test('archive has canonical root entries and all manifest declarations', t => {
   assert.ok(fs.statSync(path.join(f.dir, 'frontend/dist/index.html')).mtimeMs > 1000);
   const unpack = path.join(f.dir, 'unpack');
   fs.mkdirSync(unpack);
-  const extracted = run(tar, ['-xf', f.zip, '-C', unpack], f.dir, f.env, path.join(f.dir, 'extract.log'));
+  const extracted = extractZip(f, unpack, 'extract.log');
   assert.equal(extracted.status, 0, extracted.output);
   assert.equal(hash(path.join(unpack, 'frontend/index.html')), hash(path.join(f.dir, 'frontend/dist/index.html')));
   const unpackedManifest = JSON.parse(fs.readFileSync(path.join(unpack, 'gonavi.plugin.json'), 'utf8'));
@@ -164,11 +174,16 @@ test("rebuild removes stale staging and archive entries", t => {
   const f = fixture(t);
   assert.equal(f.build().status, 0);
   fs.writeFileSync(path.join(f.dir, 'package/frontend/obsolete.js'), 'obsolete');
-  const appended = run(tar, ["-a", "-cf", f.zip, "frontend", "bin", "gonavi.plugin.json"], path.join(f.dir, "package"), f.env, path.join(f.dir, "stale.log"));
+  const appended = run(isWindows ? tar : 'zip', isWindows
+    ? ['-a', '-cf', f.zip, 'frontend', 'bin', 'gonavi.plugin.json']
+    : ['-r', '-q', f.zip, 'frontend', 'bin', 'gonavi.plugin.json'], path.join(f.dir, 'package'), f.env, path.join(f.dir, 'stale.log'));
   assert.equal(appended.status, 0, appended.output);
+  const stale = listZip(f, 'stale-list.log');
+  assert.equal(stale.status, 0, stale.output);
+  assert.ok(stale.output.includes('obsolete.js'), 'fixture must contain the stale file before rebuilding');
   const result = f.build();
   assert.equal(result.status, 0, result.output);
-  const list = run(tar, ["-tf", f.zip], f.dir, f.env, path.join(f.dir, "rebuilt.log"));
+  const list = listZip(f, 'rebuilt.log');
   assert.equal(list.status, 0, list.output);
   assert.ok(!list.output.includes("obsolete.js"));
 });
